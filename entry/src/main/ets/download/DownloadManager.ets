@@ -1,0 +1,616 @@
+/**
+ * DownloadManager — 离线地图下载管理器
+ *
+ * 面向宿主 App 和 WebView JS Bridge 的主要 API 入口。
+ *
+ * 核心能力：
+ * - 多任务并发下载（可配置最大并发数）
+ * - 断点续传（应用退出 → 重启后自动恢复任务）
+ * - 任务队列管理（超出并发数的任务排队等待）
+ * - 进度回调（逐任务 + 全局）
+ *
+ * 使用流程：
+ * 1. 宿主 App 初始化：const mgr = new DownloadManager(context, { maxConcurrency: 3 })
+ * 2. 初始化（恢复旧任务）：await mgr.initialize()
+ * 3. 创建任务：const taskId = await mgr.createTask(config, callbacks)
+ * 4. 控制：mgr.pauseTask(taskId) / mgr.resumeTask(taskId) / mgr.cancelTask(taskId)
+ * 5. 退出前：await mgr.onDestroy()
+ */
+
+import { common } from '@kit.AbilityKit';
+import { fileIo } from '@kit.CoreFileKit';
+import { DownloadTask } from './DownloadTask';
+import {
+  DownloadCallbacks,
+  DownloadConfig,
+  DownloadProgress,
+  DownloadState,
+  DownloadTaskInfo
+} from './DownloadTypes';
+import {
+  getAllTaskInfos,
+  removeTaskInfo,
+  saveTaskInfo,
+  updateTaskState
+} from './DownloadPersist';
+
+/** 默认最大并发下载数 */
+const DEFAULT_MAX_CONCURRENCY = 3;
+
+/** 全局进度回调 */
+export interface GlobalCallbacks {
+  /** 所有任务进度总和 */
+  onGlobalProgress?: (allProgress: DownloadProgress[], summary: DownloadSummary) => void;
+  /** 单任务事件 */
+  onTaskCompleted?: (taskId: string, filePath: string) => void;
+  onTaskFailed?: (taskId: string, error: string) => void;
+  onTaskStateChange?: (taskId: string, state: DownloadState) => void;
+}
+
+/** 全局下载摘要 */
+export interface DownloadSummary {
+  /** 总任务数 */
+  totalTasks: number;
+  /** 下载中任务数 */
+  activeTasks: number;
+  /** 已完成任务数 */
+  completedTasks: number;
+  /** 失败任务数 */
+  failedTasks: number;
+  /** 总下载字节数 */
+  totalDownloadedBytes: number;
+  /** 总需下载字节数 */
+  totalBytes: number;
+  /** 整体进度 0-100 */
+  overallProgress: number;
+}
+
+export class DownloadManager {
+  /** 活跃任务集合 taskId → DownloadTask */
+  private activeTasks: Map<string, DownloadTask> = new Map();
+  /** 等待队列（taskId 列表） */
+  private pendingQueue: string[] = [];
+  /** 任务配置缓存（用于重建） */
+  private taskConfigs: Map<string, DownloadConfig> = new Map();
+  /** 任务回调缓存 */
+  private taskCallbacks: Map<string, DownloadCallbacks> = new Map();
+
+  private context: common.UIAbilityContext;
+  private maxConcurrency: number;
+  private globalCallbacks: GlobalCallbacks | null = null;
+  private filesDir: string;
+  private initialized: boolean = false;
+
+  constructor(context: common.UIAbilityContext, options?: { maxConcurrency?: number }) {
+    this.context = context;
+    this.maxConcurrency = options?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+    this.filesDir = context.filesDir;
+  }
+
+  /**
+   * 初始化管理器：恢复上次未完成的任务
+   *
+   * 应在宿主 App 的 onCreate / onPageShow 中调用
+   */
+  async initialize(globalCallbacks?: GlobalCallbacks): Promise<void> {
+    if (this.initialized) {
+      console.warn('[DownloadManager] 已经初始化，跳过');
+      return;
+    }
+
+    this.globalCallbacks = globalCallbacks ?? null;
+    console.info('[DownloadManager] 开始初始化...');
+
+    // 从持久化中恢复任务
+    const taskInfos = getAllTaskInfos(this.filesDir);
+    const recoveredTasks: string[] = [];
+
+    for (const info of taskInfos) {
+      // 跳过已完成和已取消的任务
+      if (info.state === DownloadState.COMPLETED ||
+          info.state === DownloadState.CANCELLED) {
+        continue;
+      }
+
+      // 跳过没有有效配置的任务
+      if (!info.url || !info.filePath) {
+        removeTaskInfo(this.filesDir, info.taskId);
+        continue;
+      }
+
+      // 尝试通过系统级 taskId 恢复
+      const task = this.createTaskInstance(info.url, info.filePath, info.label, info.metadata);
+      const recovered = await task.recover(info.taskId);
+
+      if (recovered) {
+        // 恢复回调
+        const callbacks = this.buildTaskCallbacks(info.taskId);
+        task.setCallbacks(callbacks);
+        this.activeTasks.set(info.taskId, task);
+        this.taskConfigs.set(info.taskId, this.infoToConfig(info));
+        this.taskCallbacks.set(info.taskId, callbacks);
+
+        if (task.getState() === DownloadState.DOWNLOADING) {
+          recoveredTasks.push(info.taskId);
+        } else if (task.getState() === DownloadState.PAUSED) {
+          // 已暂停的任务加入等待队列
+          this.pendingQueue.push(info.taskId);
+        }
+
+        console.info(`[DownloadManager] 恢复任务: ${info.taskId}, 状态: ${task.getState()}`);
+      } else {
+        // 恢复失败，标记为失败
+        updateTaskState(this.filesDir, info.taskId, DownloadState.FAILED);
+        this.globalCallbacks?.onTaskFailed?.(info.taskId,
+          '任务恢复失败：系统已清除或过期');
+      }
+    }
+
+    // 恢复的任务中，如果有超过并发限制的，把多余的任务暂停并加入队列
+    while (recoveredTasks.length > this.maxConcurrency) {
+      const extraTaskId = recoveredTasks.pop()!;
+      const extraTask = this.activeTasks.get(extraTaskId);
+      if (extraTask) {
+        await extraTask.pause();
+        this.pendingQueue.push(extraTaskId);
+      }
+    }
+
+    // 启动等待队列中的任务（受并发限制）
+    this.processPendingQueue();
+
+    this.initialized = true;
+    console.info(
+      `[DownloadManager] 初始化完成, 活跃任务: ${this.activeTasks.size}, 等待: ${this.pendingQueue.length}`);
+  }
+
+  /**
+   * 创建新的下载任务
+   *
+   * @param config 下载配置
+   * @param callbacks 任务级回调
+   * @returns taskId
+   */
+  async createTask(config: DownloadConfig, callbacks?: DownloadCallbacks): Promise<string> {
+    // 检查是否已有相同 URL + filePath 的任务
+    const existingId = this.findExistingTask(config.url, config.saveDir + '/' + config.fileName);
+    if (existingId) {
+      const existingTask = this.activeTasks.get(existingId);
+      if (existingTask) {
+        const state = existingTask.getState();
+        if (state === DownloadState.COMPLETED) {
+          console.info(`[DownloadManager] 任务已存在且已完成: ${existingId}`);
+          return existingId;
+        }
+        if (state === DownloadState.PAUSED) {
+          await this.resumeTask(existingId);
+          return existingId;
+        }
+        if (state === DownloadState.DOWNLOADING || state === DownloadState.PENDING) {
+          console.info(`[DownloadManager] 任务已在下载/排队中: ${existingId}`);
+          return existingId;
+        }
+      }
+    }
+
+    const effectiveCallbacks = callbacks ?? {};
+    const task = this.createTaskInstance(
+      config.url,
+      config.saveDir + '/' + config.fileName,
+      config.label,
+      config.metadata
+    );
+    const wrappedCallbacks = this.buildTaskCallbacks('');  // 先占位，稍后更新
+
+    task.setCallbacks(wrappedCallbacks);
+
+    // 检查并发限制
+    const activeCount = this.countDownloadingTasks();
+
+    if (activeCount >= this.maxConcurrency) {
+      // 先创建 agent 任务获取 tid，然后暂停并加入队列
+      await task.start();
+      const tid = task.getTaskId();
+
+      // 更新回调中的 taskId
+      const realCallbacks = this.buildTaskCallbacks(tid);
+      task.setCallbacks(realCallbacks);
+
+      await task.pause();
+      this.activeTasks.set(tid, task);
+      this.taskConfigs.set(tid, config);
+      this.taskCallbacks.set(tid, realCallbacks);
+
+      // 保存任务信息到持久化
+      saveTaskInfo(this.filesDir, {
+        taskId: tid,
+        url: config.url,
+        filePath: config.saveDir + '/' + config.fileName,
+        downloadedBytes: 0,
+        totalBytes: -1,
+        state: DownloadState.PAUSED,
+        label: config.label ?? '',
+        metadata: config.metadata ?? {},
+        createTime: Date.now(),
+        updateTime: Date.now()
+      });
+
+      this.pendingQueue.push(tid);
+      console.info(`[DownloadManager] 并发已满，任务 ${tid} 加入等待队列`);
+      return tid;
+    }
+
+    // 直接启动
+    await task.start();
+
+    const tid = task.getTaskId();
+    const realCallbacks = this.buildTaskCallbacks(tid);
+    task.setCallbacks(realCallbacks);
+
+    this.activeTasks.set(tid, task);
+    this.taskConfigs.set(tid, config);
+    this.taskCallbacks.set(tid, realCallbacks);
+
+    console.info(`[DownloadManager] 创建并启动任务: ${tid}`);
+    return tid;
+  }
+
+  /**
+   * 暂停指定任务
+   */
+  async pauseTask(taskId: string): Promise<void> {
+    const task = this.activeTasks.get(taskId);
+    if (!task) {
+      console.warn(`[DownloadManager] 任务不存在: ${taskId}`);
+      return;
+    }
+
+    await task.pause();
+
+    // 从等待队列中移除（如果存在）
+    this.pendingQueue = this.pendingQueue.filter(id => id !== taskId);
+
+    // 启动队列中的下一个任务
+    this.processPendingQueue();
+  }
+
+  /**
+   * 恢复指定任务
+   */
+  async resumeTask(taskId: string): Promise<void> {
+    const task = this.activeTasks.get(taskId);
+    if (!task) {
+      console.warn(`[DownloadManager] 任务不存在: ${taskId}`);
+      return;
+    }
+
+    if (task.getState() !== DownloadState.PAUSED) {
+      console.warn(`[DownloadManager] 任务 ${taskId} 当前状态: ${task.getState()}, 无法恢复`);
+      return;
+    }
+
+    const activeCount = this.countDownloadingTasks();
+    if (activeCount >= this.maxConcurrency) {
+      this.pendingQueue.push(taskId);
+      console.info(`[DownloadManager] 并发已满，任务 ${taskId} 加入等待队列`);
+      return;
+    }
+
+    // 从等待队列中移除
+    this.pendingQueue = this.pendingQueue.filter(id => id !== taskId);
+
+    await task.resume();
+    console.info(`[DownloadManager] 恢复任务: ${taskId}`);
+  }
+
+  /**
+   * 取消并删除指定任务
+   */
+  async cancelTask(taskId: string, deleteFile: boolean = false): Promise<void> {
+    const task = this.activeTasks.get(taskId);
+    if (!task) {
+      // 仅从持久化中清理
+      removeTaskInfo(this.filesDir, taskId);
+      return;
+    }
+
+    // 如果需要删除已下载的文件
+    if (deleteFile) {
+      const filePath = task.getFilePath();
+      try {
+        fileIo.unlinkSync(filePath);
+        console.info(`[DownloadManager] 已删除文件: ${filePath}`);
+      } catch (_err) {
+        // 文件可能不存在或已删除，忽略错误
+        console.warn(`[DownloadManager] 删除文件失败: ${filePath}`);
+      }
+    }
+
+    await task.cancel();
+    this.activeTasks.delete(taskId);
+    this.taskConfigs.delete(taskId);
+    this.taskCallbacks.delete(taskId);
+
+    // 从等待队列中移除
+    this.pendingQueue = this.pendingQueue.filter(id => id !== taskId);
+
+    // 启动队列中的下一个任务
+    this.processPendingQueue();
+
+    console.info(`[DownloadManager] 已取消任务: ${taskId}`);
+  }
+
+  /**
+   * 暂停所有活跃任务
+   */
+  async pauseAll(): Promise<void> {
+    const promises: Promise<void>[] = [];
+    for (const task of this.activeTasks.values()) {
+      if (task.getState() === DownloadState.DOWNLOADING) {
+        promises.push(task.pause());
+      }
+    }
+    this.pendingQueue = [];
+    await Promise.all(promises);
+    console.info('[DownloadManager] 已暂停所有任务');
+  }
+
+  /**
+   * 恢复所有已暂停任务（受并发限制）
+   */
+  async resumeAll(): Promise<void> {
+    for (const [taskId, task] of this.activeTasks.entries()) {
+      if (task.getState() === DownloadState.PAUSED) {
+        this.pendingQueue.push(taskId);
+      }
+    }
+    this.processPendingQueue();
+    console.info('[DownloadManager] 开始恢复所有任务');
+  }
+
+  /**
+   * 获取指定任务的进度
+   */
+  getTaskProgress(taskId: string): DownloadProgress | null {
+    const task = this.activeTasks.get(taskId);
+    return task ? task.getProgress() : null;
+  }
+
+  /**
+   * 获取所有任务的进度
+   */
+  getAllProgress(): DownloadProgress[] {
+    const progressList: DownloadProgress[] = [];
+    for (const task of this.activeTasks.values()) {
+      progressList.push(task.getProgress());
+    }
+    return progressList;
+  }
+
+  /**
+   * 获取下载摘要
+   */
+  getSummary(): DownloadSummary {
+    let totalDownloaded = 0;
+    let totalSize = 0;
+    let active = 0;
+    let completed = 0;
+    let failed = 0;
+
+    for (const task of this.activeTasks.values()) {
+      const progress = task.getProgress();
+      totalDownloaded += progress.downloadedBytes;
+      if (progress.totalBytes > 0) {
+        totalSize += progress.totalBytes;
+      }
+
+      switch (progress.state) {
+        case DownloadState.DOWNLOADING:
+          active++;
+          break;
+        case DownloadState.COMPLETED:
+          completed++;
+          break;
+        case DownloadState.FAILED:
+          failed++;
+          break;
+      }
+    }
+
+    const overallProgress = totalSize > 0 ?
+      Math.round((totalDownloaded / totalSize) * 100) :
+      0;
+
+    return {
+      totalTasks: this.activeTasks.size,
+      activeTasks: active,
+      completedTasks: completed,
+      failedTasks: failed,
+      totalDownloadedBytes: totalDownloaded,
+      totalBytes: totalSize,
+      overallProgress: overallProgress
+    };
+  }
+
+  /**
+   * 获取所有任务列表（供 UI 展示）
+   */
+  getTaskList(): DownloadTaskInfo[] {
+    return getAllTaskInfos(this.filesDir);
+  }
+
+  /**
+   * 检查是否有活跃下载
+   */
+  hasActiveDownloads(): boolean {
+    return this.countDownloadingTasks() > 0;
+  }
+
+  /**
+   * 生命周期：销毁前调用
+   *
+   * 应在宿主 App 的 onDestroy / onPageHide 中调用
+   */
+  async onDestroy(): Promise<void> {
+    console.info('[DownloadManager] onDestroy — 暂停所有活跃任务...');
+
+    for (const [taskId, task] of this.activeTasks.entries()) {
+      if (task.getState() === DownloadState.DOWNLOADING) {
+        await task.destroy();  // 暂停但不删除，保留 taskId 供下次恢复
+      }
+    }
+
+    this.pendingQueue = [];
+    console.info(`[DownloadManager] 已销毁。活跃任务数: ${this.activeTasks.size}`);
+  }
+
+  /**
+   * 更新全局回调
+   */
+  setGlobalCallbacks(callbacks: GlobalCallbacks): void {
+    this.globalCallbacks = callbacks;
+  }
+
+  /**
+   * 更新指定任务的回调
+   */
+  updateTaskCallbacks(taskId: string, callbacks: DownloadCallbacks): void {
+    const task = this.activeTasks.get(taskId);
+    if (task) {
+      const merged = this.buildTaskCallbacks(taskId, callbacks);
+      task.setCallbacks(merged);
+      this.taskCallbacks.set(taskId, merged);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 内部方法
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 处理等待队列，启动排队任务（受并发限制）
+   */
+  private async processPendingQueue(): Promise<void> {
+    while (this.pendingQueue.length > 0 &&
+           this.countDownloadingTasks() < this.maxConcurrency) {
+      const taskId = this.pendingQueue.shift()!;
+      const task = this.activeTasks.get(taskId);
+
+      if (!task) {
+        continue;
+      }
+
+      if (task.getState() === DownloadState.PAUSED) {
+        await task.resume();
+        console.info(`[DownloadManager] 从队列中启动任务: ${taskId}`);
+      }
+    }
+  }
+
+  /**
+   * 统计当前正在下载的任务数
+   */
+  private countDownloadingTasks(): number {
+    let count = 0;
+    for (const task of this.activeTasks.values()) {
+      if (task.getState() === DownloadState.DOWNLOADING) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * 创建 DownloadTask 实例
+   */
+  private createTaskInstance(url: string, filePath: string, label?: string,
+    metadata?: Record<string, string>): DownloadTask {
+    // 从 filePath 中拆分 saveDir 和 fileName
+    const lastSlash = filePath.lastIndexOf('/');
+    const saveDir = filePath.substring(0, lastSlash);
+    const fileName = filePath.substring(lastSlash + 1);
+
+    const config: DownloadConfig = {
+      url: url,
+      saveDir: saveDir,
+      fileName: fileName,
+      label: label,
+      metadata: metadata
+    };
+
+    return new DownloadTask(this.context, config, {});
+  }
+
+  /**
+   * 构建任务回调（包装全局回调 + 任务级回调）
+   */
+  private buildTaskCallbacks(taskId: string, extra?: DownloadCallbacks): DownloadCallbacks {
+    const g = this.globalCallbacks;
+    return {
+      onProgress: (progress: DownloadProgress) => {
+        extra?.onProgress?.(progress);
+        if (g?.onGlobalProgress) {
+          g.onGlobalProgress(this.getAllProgress(), this.getSummary());
+        }
+      },
+      onCompleted: (tid: string, filePath: string) => {
+        extra?.onCompleted?.(tid, filePath);
+        g?.onTaskCompleted?.(tid, filePath);
+        // 完成一个任务后，处理排队
+        this.processPendingQueue();
+      },
+      onFailed: (tid: string, error: string) => {
+        extra?.onFailed?.(tid, error);
+        g?.onTaskFailed?.(tid, error);
+        // 失败后也处理排队
+        this.processPendingQueue();
+      },
+      onPaused: (tid: string) => {
+        extra?.onPaused?.(tid);
+        g?.onTaskStateChange?.(tid, DownloadState.PAUSED);
+      },
+      onStateChange: (tid: string, state: DownloadState) => {
+        extra?.onStateChange?.(tid, state);
+        g?.onTaskStateChange?.(tid, state);
+      }
+    };
+  }
+
+  /**
+   * 查找已存在的任务（根据 URL + filePath）
+   */
+  private findExistingTask(url: string, filePath: string): string | null {
+    for (const [taskId, task] of this.activeTasks.entries()) {
+      if (task.getFilePath() === filePath) {
+        return taskId;
+      }
+    }
+
+    // 也检查持久化中的已完成任务
+    const allInfos = getAllTaskInfos(this.filesDir);
+    for (const info of allInfos) {
+      if (info.filePath === filePath && info.state === DownloadState.COMPLETED) {
+        return info.taskId;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 从 DownloadTaskInfo 重建 DownloadConfig
+   */
+  private infoToConfig(info: DownloadTaskInfo): DownloadConfig {
+    const lastSlash = info.filePath.lastIndexOf('/');
+    const saveDir = info.filePath.substring(0, lastSlash);
+    const fileName = info.filePath.substring(lastSlash + 1);
+
+    return {
+      url: info.url,
+      saveDir: saveDir,
+      fileName: fileName,
+      label: info.label,
+      metadata: info.metadata
+    };
+  }
+}
