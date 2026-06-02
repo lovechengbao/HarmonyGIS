@@ -1,0 +1,6 @@
+{
+  "src": [
+    "pages/MapPage",
+    "pages/SettingsPage"
+  ]
+}

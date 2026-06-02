@@ -1,0 +1,12 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "HarmonyGIS"
+    },
+    {
+      "name": "description",
+      "value": "基于 OpenHarmony 的 GIS 应用"
+    }
+  ]
+}

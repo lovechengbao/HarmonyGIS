@@ -1,0 +1,40 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "HarmonyGIS"
+    },
+    {
+      "name": "module_desc",
+      "value": "HarmonyGIS main module"
+    },
+    {
+      "name": "mainability_desc",
+      "value": "GIS Map Main Interface"
+    },
+    {
+      "name": "map_title",
+      "value": "HarmonyGIS"
+    },
+    {
+      "name": "layer_label",
+      "value": "Layers"
+    },
+    {
+      "name": "zoom_in",
+      "value": "Zoom In"
+    },
+    {
+      "name": "zoom_out",
+      "value": "Zoom Out"
+    },
+    {
+      "name": "location_label",
+      "value": "Location"
+    },
+    {
+      "name": "settings_label",
+      "value": "Settings"
+    }
+  ]
+}

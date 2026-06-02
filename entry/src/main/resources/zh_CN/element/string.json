@@ -1,0 +1,40 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "HarmonyGIS"
+    },
+    {
+      "name": "module_desc",
+      "value": "HarmonyGIS 主模块"
+    },
+    {
+      "name": "mainability_desc",
+      "value": "GIS 地图主界面"
+    },
+    {
+      "name": "map_title",
+      "value": "HarmonyGIS"
+    },
+    {
+      "name": "layer_label",
+      "value": "图层"
+    },
+    {
+      "name": "zoom_in",
+      "value": "放大"
+    },
+    {
+      "name": "zoom_out",
+      "value": "缩小"
+    },
+    {
+      "name": "location_label",
+      "value": "定位"
+    },
+    {
+      "name": "settings_label",
+      "value": "设置"
+    }
+  ]
+}

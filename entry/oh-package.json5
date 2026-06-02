@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "dependencies": {
+    "@ohos/gis": "^1.0.0",
+    "@ohos/geo_location": "^1.0.0",
+    "@ohos/map": "^1.0.0"
+  }
+}
