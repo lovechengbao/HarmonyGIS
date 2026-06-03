@@ -172,13 +172,20 @@ export class DownloadTask {
     }
 
     try {
-      await this.agentTask.resume();
+      // 删除旧任务，用已下载字节偏移重建，确保 Range 头正确
+      this.removeEventListeners();
+      await this.agentTask.delete();
+      this.agentTask = null;
+
+      await this.createAgentTask(this.downloadedBytes);
       this.setState(DownloadState.DOWNLOADING);
       this.lastSampleTime = Date.now();
       this.lastSampleBytes = this.downloadedBytes;
       this.retryCount = 0;
-      updateTaskState(this.filesDir, this.tid, DownloadState.DOWNLOADING);
-      console.info(`[DownloadTask] 已恢复下载, taskId: ${this.tid}`);
+
+      await this.agentTask!.start();
+      this.persistTaskInfo();
+      console.info(`[DownloadTask] 已恢复下载（断点续传, begins=${this.downloadedBytes}）, taskId: ${this.tid}`);
     } catch (err) {
       const msg = `恢复下载失败: ${JSON.stringify(err)}`;
       console.error(`[DownloadTask] ${msg}`);
@@ -291,7 +298,7 @@ export class DownloadTask {
   /**
    * 创建 request.agent 任务
    */
-  private async createAgentTask(): Promise<void> {
+  private async createAgentTask(begins: number = 0): Promise<void> {
     const network = this.config.networkType === DownloadNetworkType.WIFI ?
       request.agent.Network.WIFI :
       request.agent.Network.ANY;
@@ -307,7 +314,7 @@ export class DownloadTask {
       retry: false,  // 我们自己管理重试逻辑
       network: network,
       title: this.config.label ?? 'HarmonyGIS Offline Map',
-      begins: 0,
+      begins: begins,
       ends: -1
     };
 
@@ -490,10 +497,10 @@ export class DownloadTask {
       this.agentTask = null;
 
       try {
-        await this.createAgentTask();
+        await this.createAgentTask(this.downloadedBytes);
         await this.agentTask!.start();
         this.setState(DownloadState.DOWNLOADING);
-        console.info(`[DownloadTask] 重建任务重试成功, tid: ${this.tid}`);
+        console.info(`[DownloadTask] 重建任务重试成功（断点续传, begins=${this.downloadedBytes}）, tid: ${this.tid}`);
       } catch (createErr) {
         const msg = `重建任务失败: ${JSON.stringify(createErr)}`;
         console.error(`[DownloadTask] ${msg}`);
