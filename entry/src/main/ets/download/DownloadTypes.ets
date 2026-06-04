@@ -78,7 +78,7 @@ export interface DownloadProgress {
  * 持久化的任务元数据
  */
 export interface DownloadTaskInfo {
-  /** 任务唯一标识（与 request.agent 的 tid 一致） */
+  /** 任务唯一标识（应用层生成，持久化保存） */
   taskId: string;
   /** 下载地址 */
   url: string;

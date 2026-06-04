@@ -3,8 +3,8 @@
  *
  * 持久化文件位置: {context.filesDir}/harmonygis_downloads.json
  *
- * 关键设计：应用退出前暂停所有任务，持久化 taskId；
- * 重启后通过 request.agent.getTask(tid) 恢复系统级任务，自动断点续传。
+ * 关键设计：应用退出前暂停所有任务，持久化 taskId 和已下载字节数；
+ * 重启后从持久化恢复，resume 时通过 HTTP Range 头实现断点续传。
  */
 
 import { fileIo } from '@kit.CoreFileKit';

@@ -1,23 +1,22 @@
 /**
- * DownloadManager — 离线地图下载管理器
+ * DownloadManager — 离线地图下载管理器（基于 @ohos.net.http 直连）
  *
  * 面向宿主 App 和 WebView JS Bridge 的主要 API 入口。
  *
  * 核心能力：
  * - 多任务并发下载（可配置最大并发数）
- * - 断点续传（应用退出 → 重启后自动恢复任务）
+ * - 断点续传（HTTP Range 头，应用退出 → 重启后自动恢复任务）
  * - 任务队列管理（超出并发数的任务排队等待）
  * - 进度回调（逐任务 + 全局）
  *
  * 使用流程：
- * 1. 宿主 App 初始化：const mgr = new DownloadManager(context, { maxConcurrency: 3 })
+ * 1. 宿主 App 初始化：const mgr = new DownloadManager(context.filesDir, { maxConcurrency: 3 })
  * 2. 初始化（恢复旧任务）：await mgr.initialize()
  * 3. 创建任务：const taskId = await mgr.createTask(config, callbacks)
  * 4. 控制：mgr.pauseTask(taskId) / mgr.resumeTask(taskId) / mgr.cancelTask(taskId)
  * 5. 退出前：await mgr.onDestroy()
  */
 
-import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { DownloadTask } from './DownloadTask';
 import {
@@ -75,22 +74,26 @@ export class DownloadManager {
   /** 任务回调缓存 */
   private taskCallbacks: Map<string, DownloadCallbacks> = new Map();
 
-  private context: common.UIAbilityContext;
   private maxConcurrency: number;
   private globalCallbacks: GlobalCallbacks | null = null;
   private filesDir: string;
   private initialized: boolean = false;
 
-  constructor(context: common.UIAbilityContext, options?: { maxConcurrency?: number }) {
-    this.context = context;
+  /**
+   * @param filesDir 应用沙箱 filesDir（用于持久化和文件保存）
+   * @param options 可选配置
+   */
+  constructor(filesDir: string, options?: { maxConcurrency?: number }) {
+    this.filesDir = filesDir;
     this.maxConcurrency = options?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
-    this.filesDir = context.filesDir;
   }
 
   /**
    * 初始化管理器：恢复上次未完成的任务
    *
-   * 应在宿主 App 的 onCreate / onPageShow 中调用
+   * 应在宿主 App 的 onCreate / onPageShow 中调用。
+   * 恢复的任务全部进入 PAUSED 状态（HTTP 连接无法跨进程存活），
+   * 通过 resumeTask() 恢复时会自动带上 Range 头断点续传。
    */
   async initialize(globalCallbacks?: GlobalCallbacks): Promise<void> {
     if (this.initialized) {
@@ -103,7 +106,6 @@ export class DownloadManager {
 
     // 从持久化中恢复任务
     const taskInfos = getAllTaskInfos(this.filesDir);
-    const recoveredTasks: string[] = [];
 
     for (const info of taskInfos) {
       // 跳过已完成和已取消的任务
@@ -118,42 +120,21 @@ export class DownloadManager {
         continue;
       }
 
-      // 尝试通过系统级 taskId 恢复
+      // 创建任务实例并从持久化数据恢复
       const task = this.createTaskInstance(info.url, info.filePath, info.label, info.metadata);
-      const recovered = await task.recover(info.taskId);
+      task.recover(info.taskId, info.downloadedBytes, info.totalBytes);
 
-      if (recovered) {
-        // 恢复回调
-        const callbacks = this.buildTaskCallbacks(info.taskId);
-        task.setCallbacks(callbacks);
-        this.activeTasks.set(info.taskId, task);
-        this.taskConfigs.set(info.taskId, this.infoToConfig(info));
-        this.taskCallbacks.set(info.taskId, callbacks);
+      // 绑定回调
+      const callbacks = this.buildTaskCallbacks(info.taskId);
+      task.setCallbacks(callbacks);
+      this.activeTasks.set(info.taskId, task);
+      this.taskConfigs.set(info.taskId, this.infoToConfig(info));
+      this.taskCallbacks.set(info.taskId, callbacks);
 
-        if (task.getState() === DownloadState.DOWNLOADING) {
-          recoveredTasks.push(info.taskId);
-        } else if (task.getState() === DownloadState.PAUSED) {
-          // 已暂停的任务加入等待队列
-          this.pendingQueue.push(info.taskId);
-        }
+      // 恢复的任务全部加入等待队列（HTTP 连接已断，需手动 resume）
+      this.pendingQueue.push(info.taskId);
 
-        console.info(`[DownloadManager] 恢复任务: ${info.taskId}, 状态: ${task.getState()}`);
-      } else {
-        // 恢复失败，标记为失败
-        updateTaskState(this.filesDir, info.taskId, DownloadState.FAILED);
-        this.globalCallbacks?.onTaskFailed?.(info.taskId,
-          '任务恢复失败：系统已清除或过期');
-      }
-    }
-
-    // 恢复的任务中，如果有超过并发限制的，把多余的任务暂停并加入队列
-    while (recoveredTasks.length > this.maxConcurrency) {
-      const extraTaskId = recoveredTasks.pop()!;
-      const extraTask = this.activeTasks.get(extraTaskId);
-      if (extraTask) {
-        await extraTask.pause();
-        this.pendingQueue.push(extraTaskId);
-      }
+      console.info(`[DownloadManager] 恢复任务: ${info.taskId}, 已下载: ${info.downloadedBytes}`);
     }
 
     // 启动等待队列中的任务（受并发限制）
@@ -200,15 +181,14 @@ export class DownloadManager {
       config.label,
       config.metadata
     );
-    const wrappedCallbacks = this.buildTaskCallbacks('');  // 先占位，稍后更新
-
+    const wrappedCallbacks = this.buildTaskCallbacks('');
     task.setCallbacks(wrappedCallbacks);
 
     // 检查并发限制
     const activeCount = this.countDownloadingTasks();
 
     if (activeCount >= this.maxConcurrency) {
-      // 先创建 agent 任务获取 tid，然后暂停并加入队列
+      // 先创建任务获取 taskId，然后暂停并加入队列
       await task.start();
       const tid = task.getTaskId();
 
@@ -275,7 +255,7 @@ export class DownloadManager {
   }
 
   /**
-   * 恢复指定任务
+   * 恢复指定任务（自动带 Range 头断点续传）
    */
   async resumeTask(taskId: string): Promise<void> {
     const task = this.activeTasks.get(taskId);
@@ -456,7 +436,7 @@ export class DownloadManager {
 
     for (const [taskId, task] of this.activeTasks.entries()) {
       if (task.getState() === DownloadState.DOWNLOADING) {
-        await task.destroy();  // 暂停但不删除，保留 taskId 供下次恢复
+        await task.destroy(); // 暂停但不删除，保留 taskId 供下次恢复
       }
     }
 
@@ -538,7 +518,7 @@ export class DownloadManager {
       metadata: metadata
     };
 
-    return new DownloadTask(this.context, config, {});
+    return new DownloadTask(config, {}, this.filesDir);
   }
 
   /**

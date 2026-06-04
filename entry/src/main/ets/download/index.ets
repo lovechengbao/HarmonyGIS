@@ -7,7 +7,7 @@
  * import { DownloadManager, DownloadConfig, DownloadState } from '../download/index';
  *
  * // 1. 初始化
- * const mgr = new DownloadManager(context, { maxConcurrency: 3 });
+ * const mgr = new DownloadManager(context.filesDir, { maxConcurrency: 3 });
  * await mgr.initialize({
  *   onGlobalProgress: (all, summary) => { console.log(`总进度: ${summary.overallProgress}%`) },
  *   onTaskCompleted: (tid, path) => { console.log(`完成: ${tid}`) },
