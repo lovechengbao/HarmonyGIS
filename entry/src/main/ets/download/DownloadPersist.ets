@@ -62,8 +62,8 @@ export function savePersistRecord(filesDir: string, record: PersistRecord): void
 /**
  * 添加或更新单条任务记录
  */
-export function saveTaskInfo(filesDir: string, taskInfo: DownloadTaskInfo): void {
-  const record = loadPersistRecordSync(filesDir);
+export async function saveTaskInfo(filesDir: string, taskInfo: DownloadTaskInfo): Promise<void> {
+  const record = await loadPersistRecord(filesDir);
   taskInfo.updateTime = Date.now();
   record.tasks[taskInfo.taskId] = taskInfo;
   savePersistRecord(filesDir, record);
@@ -72,8 +72,8 @@ export function saveTaskInfo(filesDir: string, taskInfo: DownloadTaskInfo): void
 /**
  * 删除单条任务记录
  */
-export function removeTaskInfo(filesDir: string, taskId: string): void {
-  const record = loadPersistRecordSync(filesDir);
+export async function removeTaskInfo(filesDir: string, taskId: string): Promise<void> {
+  const record = await loadPersistRecord(filesDir);
   if (record.tasks[taskId]) {
     delete record.tasks[taskId];
     savePersistRecord(filesDir, record);
@@ -83,25 +83,25 @@ export function removeTaskInfo(filesDir: string, taskId: string): void {
 /**
  * 获取所有持久化的任务信息
  */
-export function getAllTaskInfos(filesDir: string): DownloadTaskInfo[] {
-  const record = loadPersistRecordSync(filesDir);
+export async function getAllTaskInfos(filesDir: string): Promise<DownloadTaskInfo[]> {
+  const record = await loadPersistRecord(filesDir);
   return Object.values(record.tasks);
 }
 
 /**
  * 获取单条任务信息
  */
-export function getTaskInfo(filesDir: string, taskId: string): DownloadTaskInfo | null {
-  const record = loadPersistRecordSync(filesDir);
+export async function getTaskInfo(filesDir: string, taskId: string): Promise<DownloadTaskInfo | null> {
+  const record = await loadPersistRecord(filesDir);
   return record.tasks[taskId] ?? null;
 }
 
 /**
  * 更新任务状态
  */
-export function updateTaskState(filesDir: string, taskId: string, state: DownloadState,
-  downloadedBytes?: number, totalBytes?: number): void {
-  const record = loadPersistRecordSync(filesDir);
+export async function updateTaskState(filesDir: string, taskId: string, state: DownloadState,
+  downloadedBytes?: number, totalBytes?: number): Promise<void> {
+  const record = await loadPersistRecord(filesDir);
   const task = record.tasks[taskId];
   if (task) {
     task.state = state;
@@ -123,26 +123,4 @@ function createEmptyRecord(): PersistRecord {
     version: PERSIST_VERSION,
     tasks: {}
   };
-}
-
-function loadPersistRecordSync(filesDir: string): PersistRecord {
-  const filePath = filesDir + '/' + PERSIST_FILE;
-
-  try {
-    const stat = fileIo.statSync(filePath);
-    if (!stat.isFile()) {
-      return createEmptyRecord();
-    }
-    const content = fileIo.readTextSync(filePath);
-    if (!content || content.trim().length === 0) {
-      return createEmptyRecord();
-    }
-    const record: PersistRecord = JSON.parse(content);
-    if (record.version !== PERSIST_VERSION) {
-      return createEmptyRecord();
-    }
-    return record;
-  } catch (_err) {
-    return createEmptyRecord();
-  }
 }

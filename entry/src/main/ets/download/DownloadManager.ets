@@ -105,7 +105,7 @@ export class DownloadManager {
     console.info('[DownloadManager] 开始初始化...');
 
     // 从持久化中恢复任务
-    const taskInfos = getAllTaskInfos(this.filesDir);
+    const taskInfos = await getAllTaskInfos(this.filesDir);
 
     for (const info of taskInfos) {
       // 跳过已完成和已取消的任务
@@ -116,7 +116,7 @@ export class DownloadManager {
 
       // 跳过没有有效配置的任务
       if (!info.url || !info.filePath) {
-        removeTaskInfo(this.filesDir, info.taskId);
+        await removeTaskInfo(this.filesDir, info.taskId);
         continue;
       }
 
@@ -202,7 +202,7 @@ export class DownloadManager {
       this.taskCallbacks.set(tid, realCallbacks);
 
       // 保存任务信息到持久化
-      saveTaskInfo(this.filesDir, {
+      await saveTaskInfo(this.filesDir, {
         taskId: tid,
         url: config.url,
         filePath: config.saveDir + '/' + config.fileName,
@@ -290,7 +290,7 @@ export class DownloadManager {
     const task = this.activeTasks.get(taskId);
     if (!task) {
       // 仅从持久化中清理
-      removeTaskInfo(this.filesDir, taskId);
+      await removeTaskInfo(this.filesDir, taskId);
       return;
     }
 
@@ -415,8 +415,8 @@ export class DownloadManager {
   /**
    * 获取所有任务列表（供 UI 展示）
    */
-  getTaskList(): DownloadTaskInfo[] {
-    return getAllTaskInfos(this.filesDir);
+  async getTaskList(): Promise<DownloadTaskInfo[]> {
+    return await getAllTaskInfos(this.filesDir);
   }
 
   /**
@@ -567,7 +567,7 @@ export class DownloadManager {
     }
 
     // 也检查持久化中的已完成任务
-    const allInfos = getAllTaskInfos(this.filesDir);
+    const allInfos = await getAllTaskInfos(this.filesDir);
     for (const info of allInfos) {
       if (info.filePath === filePath && info.state === DownloadState.COMPLETED) {
         return info.taskId;

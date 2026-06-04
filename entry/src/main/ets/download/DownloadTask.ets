@@ -134,12 +134,12 @@ export class DownloadTask {
       this.lastPersistTime = now;
 
       // 持久化任务信息
-      this.persistTaskInfo();
+      await this.persistTaskInfo();
       console.info(`[DownloadTask] 下载启动成功, taskId: ${this.tid}`);
     } catch (err) {
       const msg = `启动下载失败: ${JSON.stringify(err)}`;
       console.error(`[DownloadTask] ${msg}`);
-      this.handleFailure(msg);
+      await this.handleFailure(msg);
     }
   }
 
@@ -154,7 +154,7 @@ export class DownloadTask {
     this.destroyHttpRequest();
     this.closeFileFd();
     this.setState(DownloadState.PAUSED);
-    updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
+    await updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
       this.totalBytes);
     this.callbacks.onPaused?.(this.tid);
     console.info(`[DownloadTask] 已暂停, taskId: ${this.tid}, 已下载: ${this.downloadedBytes}`);
@@ -178,12 +178,12 @@ export class DownloadTask {
       this.lastSpeedSampleBytes = this.downloadedBytes;
       this.lastPersistTime = now;
       this.retryCount = 0;
-      this.persistTaskInfo();
+      await this.persistTaskInfo();
       console.info(`[DownloadTask] 已恢复下载（Range: bytes=${this.downloadedBytes}-）, taskId: ${this.tid}`);
     } catch (err) {
       const msg = `恢复下载失败: ${JSON.stringify(err)}`;
       console.error(`[DownloadTask] ${msg}`);
-      this.handleFailure(msg);
+      await this.handleFailure(msg);
     }
   }
 
@@ -201,7 +201,7 @@ export class DownloadTask {
     this.closeFileFd();
 
     this.setState(DownloadState.CANCELLED);
-    removeTaskInfo(this.filesDir, this.tid);
+    await removeTaskInfo(this.filesDir, this.tid);
     console.info(`[DownloadTask] 已取消, taskId: ${this.tid}`);
   }
 
@@ -239,7 +239,7 @@ export class DownloadTask {
       this.destroyHttpRequest();
       this.closeFileFd();
       this.setState(DownloadState.PAUSED);
-      updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
+      await updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
         this.totalBytes);
       console.info(`[DownloadTask] 销毁时已暂停任务, tid: ${this.tid}`);
     }
@@ -288,7 +288,7 @@ export class DownloadTask {
         try {
           fileIo.writeSync(this.fileFd, data);
           this.downloadedBytes += data.byteLength;
-          this.updateProgressCallback();
+          await this.updateProgressCallback();
         } catch (err) {
           console.error(`[DownloadTask] 写文件失败: ${JSON.stringify(err)}`);
           reject(new Error(`写文件失败: ${JSON.stringify(err)}`));
@@ -314,7 +314,7 @@ export class DownloadTask {
           return;
         }
         this.closeFileFd();
-        this.handleCompleted();
+        await this.handleCompleted();
         resolve();
       });
 
@@ -417,7 +417,7 @@ export class DownloadTask {
   /**
    * 更新进度回调（计算速度 + 定期持久化）
    */
-  private updateProgressCallback(): void {
+  private async updateProgressCallback(): Promise<void> {
     const now = Date.now();
 
     // 每秒更新一次速度
@@ -434,7 +434,7 @@ export class DownloadTask {
     // 每 5 秒持久化一次进度
     const persistDelta = now - this.lastPersistTime;
     if (persistDelta >= PERSIST_INTERVAL) {
-      updateTaskState(this.filesDir, this.tid, DownloadState.DOWNLOADING,
+      await updateTaskState(this.filesDir, this.tid, DownloadState.DOWNLOADING,
         this.downloadedBytes, this.totalBytes);
       this.lastPersistTime = now;
     }
@@ -450,7 +450,7 @@ export class DownloadTask {
   /**
    * 处理下载完成
    */
-  private handleCompleted(): void {
+  private async handleCompleted(): Promise<void> {
     if (this.destroyed) {
       return;
     }
@@ -460,7 +460,7 @@ export class DownloadTask {
     this.currentSpeed = 0;
 
     this.setState(DownloadState.COMPLETED);
-    updateTaskState(this.filesDir, this.tid, DownloadState.COMPLETED,
+    await updateTaskState(this.filesDir, this.tid, DownloadState.COMPLETED,
       this.downloadedBytes, this.totalBytes);
 
     this.callbacks.onCompleted?.(this.tid, this.filePath);
@@ -472,7 +472,7 @@ export class DownloadTask {
   /**
    * 统一失败处理 + 重试逻辑
    */
-  private handleFailure(errMsg: string): void {
+  private async handleFailure(errMsg: string): Promise<void> {
     if (this.destroyed) {
       return;
     }
@@ -488,7 +488,7 @@ export class DownloadTask {
       }, delay);
     } else {
       this.setState(DownloadState.FAILED);
-      updateTaskState(this.filesDir, this.tid, DownloadState.FAILED,
+      await updateTaskState(this.filesDir, this.tid, DownloadState.FAILED,
         this.downloadedBytes, this.totalBytes);
       this.callbacks.onFailed?.(this.tid, errMsg);
       console.error(`[DownloadTask] 下载最终失败（已重试 ${this.maxRetries} 次）, taskId: ${this.tid}`);
@@ -508,7 +508,7 @@ export class DownloadTask {
       this.setState(DownloadState.DOWNLOADING);
       console.info(`[DownloadTask] 重试恢复成功（Range: bytes=${this.downloadedBytes}-）`);
     } catch (err) {
-      this.handleFailure(`重试失败: ${JSON.stringify(err)}`);
+      await this.handleFailure(`重试失败: ${JSON.stringify(err)}`);
     }
   }
 
@@ -539,8 +539,8 @@ export class DownloadTask {
   /**
    * 持久化当前任务信息
    */
-  private persistTaskInfo(): void {
-    saveTaskInfo(this.filesDir, {
+  private async persistTaskInfo(): Promise<void> {
+    await saveTaskInfo(this.filesDir, {
       taskId: this.tid,
       url: this.config.url,
       filePath: this.filePath,
