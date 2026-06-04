@@ -82,7 +82,9 @@ export class HttpResumeDownloader {
 
   // ── 运行时状态 ──
   private httpRequest: http.HttpRequest | null = null;
-  private fileFd: number = -1;
+  private file: fs.File | null = null;
+  /** 异步写队列：保证写入顺序 */
+  private writeQueue: Promise<void> = Promise.resolve();
   private state: ResumeDownloaderState = ResumeDownloaderState.IDLE;
   private startByte: number = 0;
   private downloadedBytes: number = 0;
@@ -182,7 +184,7 @@ export class HttpResumeDownloader {
 
     // 检测本地文件尺寸以确定断点位置
     if (this.state === ResumeDownloaderState.IDLE) {
-      this.startByte = this.checkFileSize();
+      this.startByte = await this.checkFileSize();
     }
     // PAUSED 状态下 startByte 保持不变（已在 downloadLoop 中更新）
 
@@ -211,7 +213,7 @@ export class HttpResumeDownloader {
     }
     this.shouldStop = true;
     this.destroyHttpRequest();
-    this.closeFileFd();
+    await this.closeFile();
     this.startByte = this.downloadedBytes; // 更新断点位置供下次 start() 使用
     this.setState(ResumeDownloaderState.PAUSED);
     console.info(`[HttpResumeDownloader] 已暂停, nextStartByte=${this.startByte}`);
@@ -225,7 +227,7 @@ export class HttpResumeDownloader {
   async cancel(deleteFile: boolean = false): Promise<void> {
     this.shouldStop = true;
     this.destroyHttpRequest();
-    this.closeFileFd();
+    await this.closeFile();
 
     if (deleteFile) {
       try {
@@ -246,7 +248,7 @@ export class HttpResumeDownloader {
    */
   reset(): void {
     this.destroyHttpRequest();
-    this.closeFileFd();
+    await this.closeFile();
     this.state = ResumeDownloaderState.IDLE;
     this.startByte = 0;
     this.downloadedBytes = 0;
@@ -262,42 +264,41 @@ export class HttpResumeDownloader {
    * 发起带 Range 头的流式下载
    */
   private async downloadLoop(): Promise<void> {
+    // 清理旧资源（异步，不阻塞主线程）
+    this.destroyHttpRequest();
+    await this.closeFile();
+    await this.openFile();
+
+    // 构建请求头
+    const headers: Record<string, string> = {};
+    const customKeys = Object.keys(this.customHeaders);
+    for (let i = 0; i < customKeys.length; i++) {
+      headers[customKeys[i]] = this.customHeaders[customKeys[i]];
+    }
+
+    if (this.startByte > 0) {
+      headers['Range'] = `bytes=${this.startByte}-`;
+      console.info(`[HttpResumeDownloader] 断点续传 Range: bytes=${this.startByte}-`);
+    }
+
     return new Promise<void>((resolve, reject) => {
-      // 清理旧连接
-      this.destroyHttpRequest();
-      this.closeFileFd();
-
-      // 打开文件（新下载截断，续传追加）
-      this.openFile();
-
-      // 构建请求头
-      const headers: Record<string, string> = {};
-      const customKeys = Object.keys(this.customHeaders);
-      for (let i = 0; i < customKeys.length; i++) {
-        headers[customKeys[i]] = this.customHeaders[customKeys[i]];
-      }
-
-      if (this.startByte > 0) {
-        headers['Range'] = `bytes=${this.startByte}-`;
-        console.info(`[HttpResumeDownloader] 断点续传 Range: bytes=${this.startByte}-`);
-      }
-
       // 创建 HTTP 请求
       this.httpRequest = http.createHttp();
 
-      // ── dataReceive: 逐块写入文件 ──
+      // ── dataReceive: 异步顺序写入文件，不阻塞主线程 ──
       this.httpRequest.on('dataReceive', (data: ArrayBuffer) => {
-        if (this.shouldStop) {
+        if (this.shouldStop || !this.file) {
           return;
         }
-        try {
-          fs.writeSync(this.fileFd, data);
+        // 用写队列保证写入顺序
+        this.writeQueue = this.writeQueue.then(async () => {
+          await fs.write(this.file!.fd, data);
           this.downloadedBytes += data.byteLength;
           this.notifyProgress();
-        } catch (err) {
-          console.error(`[HttpResumeDownloader] 写文件失败: ${JSON.stringify(err)}`);
-          reject(new Error(`写文件失败: ${JSON.stringify(err)}`));
-        }
+        }).catch((err: Error) => {
+          console.error(`[HttpResumeDownloader] 写文件失败: ${err.message}`);
+          reject(new Error(`写文件失败: ${err.message}`));
+        });
       });
 
       // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
@@ -312,12 +313,13 @@ export class HttpResumeDownloader {
       });
 
       // ── dataEnd: 下载完成 ──
-      this.httpRequest.on('dataEnd', () => {
+      this.httpRequest.on('dataEnd', async () => {
         if (this.shouldStop) {
           resolve();
           return;
         }
-        this.closeFileFd();
+        await this.writeQueue;
+        await this.closeFile();
         this.setState(ResumeDownloaderState.COMPLETED);
         console.info(`[HttpResumeDownloader] 下载完成: ${this.filePath}`);
         this.completeCallback?.(this.filePath);
@@ -325,12 +327,13 @@ export class HttpResumeDownloader {
       });
 
       // ── dataError: 下载出错 ──
-      this.httpRequest.on('dataError', (err: Error) => {
+      this.httpRequest.on('dataError', async (err: Error) => {
         if (this.shouldStop) {
           resolve();
           return;
         }
-        this.closeFileFd();
+        await this.writeQueue;
+        await this.closeFile();
         reject(err);
       });
 
@@ -342,12 +345,13 @@ export class HttpResumeDownloader {
         readTimeout: this.readTimeout,
       }).then((_responseCode: number) => {
         // 流式响应：dataEnd 中处理完成逻辑
-      }).catch((err: Error) => {
+      }).catch(async (err: Error) => {
         if (this.shouldStop) {
           resolve();
           return;
         }
-        this.closeFileFd();
+        await this.writeQueue;
+        await this.closeFile();
         reject(err);
       });
     });
@@ -358,11 +362,11 @@ export class HttpResumeDownloader {
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 检查本地文件尺寸，返回断点位置
+   * 检查本地文件尺寸，返回断点位置（异步，不阻塞主线程）
    */
-  private checkFileSize(): number {
+  private async checkFileSize(): Promise<number> {
     try {
-      const stat = fs.statSync(this.filePath);
+      const stat = await fs.stat(this.filePath);
       if (stat.size > 0) {
         console.info(`[HttpResumeDownloader] 检测到已有文件, size=${stat.size}`);
         return stat.size;
@@ -374,19 +378,19 @@ export class HttpResumeDownloader {
   }
 
   /**
-   * 打开文件（新下载截断创建，续传追加写）
+   * 打开文件（异步，不阻塞主线程）
    */
-  private openFile(): void {
+  private async openFile(): Promise<void> {
     try {
       if (this.startByte > 0) {
         // 断点续传：追加模式，不截断已有数据
-        this.fileFd = fs.openSync(
+        this.file = await fs.open(
           this.filePath,
           fs.OpenMode.WRITE_ONLY | fs.OpenMode.APPEND | fs.OpenMode.CREATE
         );
       } else {
         // 新下载：截断创建
-        this.fileFd = fs.openSync(
+        this.file = await fs.open(
           this.filePath,
           fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.TRUNC
         );
@@ -399,16 +403,18 @@ export class HttpResumeDownloader {
   }
 
   /**
-   * 安全关闭文件描述符
+   * 安全关闭文件（等待写队列排空后关闭）
    */
-  private closeFileFd(): void {
-    if (this.fileFd >= 0) {
+  private async closeFile(): Promise<void> {
+    if (this.file) {
+      await this.writeQueue;
       try {
-        fs.closeSync(this.fileFd);
+        await fs.close(this.file);
       } catch (err) {
         console.warn(`[HttpResumeDownloader] 关闭文件异常: ${JSON.stringify(err)}`);
       }
-      this.fileFd = -1;
+      this.file = null;
+      this.writeQueue = Promise.resolve();
     }
   }
 

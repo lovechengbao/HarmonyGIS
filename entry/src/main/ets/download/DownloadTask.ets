@@ -36,8 +36,10 @@ export class DownloadTask {
   private tid: string = '';
   /** HTTP 请求实例（下载中非空，暂停/完成后为 null） */
   private httpRequest: http.HttpRequest | null = null;
-  /** 当前打开的文件描述符（-1 表示未打开） */
-  private fileFd: number = -1;
+  /** 当前打开的文件对象（null 表示未打开） */
+  private file: fileIo.File | null = null;
+  /** 异步写队列：保证写入顺序，避免多个 write 并发导致数据错乱 */
+  private writeQueue: Promise<void> = Promise.resolve();
   /** 任务配置 */
   private config: DownloadConfig;
   /** 回调集合 */
@@ -145,7 +147,7 @@ export class DownloadTask {
     }
 
     this.destroyHttpRequest();
-    this.closeFileFd();
+    await this.closeFile();
     this.setState(DownloadState.PAUSED);
     await updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
       this.totalBytes);
@@ -189,7 +191,7 @@ export class DownloadTask {
     this.clearRetryTimer();
 
     this.destroyHttpRequest();
-    this.closeFileFd();
+    await this.closeFile();
 
     this.setState(DownloadState.CANCELLED);
     await removeTaskInfo(this.filesDir, this.tid);
@@ -228,7 +230,7 @@ export class DownloadTask {
 
     if (this.state === DownloadState.DOWNLOADING) {
       this.destroyHttpRequest();
-      this.closeFileFd();
+      await this.closeFile();
       this.setState(DownloadState.PAUSED);
       await updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
         this.totalBytes);
@@ -246,44 +248,43 @@ export class DownloadTask {
    * @param begins 起始字节偏移（0 = 新下载，>0 = 断点续传）
    */
   private async startHttpDownload(begins: number): Promise<void> {
+    // 清理旧资源（异步，不阻塞主线程）
+    this.destroyHttpRequest();
+    await this.closeFile();
+    await this.openFile(begins > 0);
+
+    // 构建请求头：断点续传时添加 Range
+    const headers: Record<string, string> = {};
+    if (this.config.headers) {
+      const keys = Object.keys(this.config.headers);
+      for (let i = 0; i < keys.length; i++) {
+        headers[keys[i]] = this.config.headers[keys[i]];
+      }
+    }
+
+    if (begins > 0) {
+      headers['Range'] = `bytes=${begins}-`;
+      console.info(`[DownloadTask] Range 请求头: bytes=${begins}-`);
+    }
+
     return new Promise<void>((resolve, reject) => {
-      // 清理旧请求和文件描述符
-      this.destroyHttpRequest();
-      this.closeFileFd();
-
-      // 打开文件
-      this.openFileFd(begins > 0);
-
-      // 构建请求头：断点续传时添加 Range
-      const headers: Record<string, string> = {};
-      if (this.config.headers) {
-        const keys = Object.keys(this.config.headers);
-        for (let i = 0; i < keys.length; i++) {
-          headers[keys[i]] = this.config.headers[keys[i]];
-        }
-      }
-
-      if (begins > 0) {
-        headers['Range'] = `bytes=${begins}-`;
-        console.info(`[DownloadTask] Range 请求头: bytes=${begins}-`);
-      }
-
       // 创建 HTTP 请求
       this.httpRequest = http.createHttp();
 
-      // ── dataReceive: 逐块写入文件 ──
+      // ── dataReceive: 异步顺序写入文件，不阻塞主线程 ──
       this.httpRequest.on('dataReceive', (data: ArrayBuffer) => {
-        if (this.destroyed) {
+        if (this.destroyed || !this.file) {
           return;
         }
-        try {
-          fileIo.writeSync(this.fileFd, data);
+        // 用写队列保证写入顺序（后一块必须等前一块写完）
+        this.writeQueue = this.writeQueue.then(async () => {
+          await fileIo.write(this.file!.fd, data);
           this.downloadedBytes += data.byteLength;
           await this.updateProgressCallback();
-        } catch (err) {
-          console.error(`[DownloadTask] 写文件失败: ${JSON.stringify(err)}`);
-          reject(new Error(`写文件失败: ${JSON.stringify(err)}`));
-        }
+        }).catch((err: Error) => {
+          console.error(`[DownloadTask] 写文件失败: ${err.message}`);
+          reject(new Error(`写文件失败: ${err.message}`));
+        });
       });
 
       // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
@@ -300,21 +301,24 @@ export class DownloadTask {
       });
 
       // ── dataEnd: 下载完成 ──
-      this.httpRequest.on('dataEnd', () => {
+      this.httpRequest.on('dataEnd', async () => {
         if (this.destroyed) {
           return;
         }
-        this.closeFileFd();
+        // 等待所有排队的写操作完成
+        await this.writeQueue;
+        await this.closeFile();
         await this.handleCompleted();
         resolve();
       });
 
       // ── dataError: 下载出错 ──
-      this.httpRequest.on('dataError', (err: Error) => {
+      this.httpRequest.on('dataError', async (err: Error) => {
         if (this.destroyed) {
           return;
         }
-        this.closeFileFd();
+        await this.writeQueue;
+        await this.closeFile();
         const errMsg = err?.message ?? JSON.stringify(err);
         console.error(`[DownloadTask] HTTP 数据错误: ${errMsg}`);
         reject(new Error(errMsg));
@@ -328,11 +332,12 @@ export class DownloadTask {
         readTimeout: 60000,
       }).then((_responseCode: number) => {
         // 流式响应：dataEnd 中处理完成逻辑
-      }).catch((err: Error) => {
+      }).catch(async (err: Error) => {
         if (this.destroyed) {
           return;
         }
-        this.closeFileFd();
+        await this.writeQueue;
+        await this.closeFile();
         reject(err);
       });
     });
@@ -343,21 +348,21 @@ export class DownloadTask {
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 打开目标文件
+   * 打开目标文件（异步，不阻塞主线程）
    *
    * @param append true = 追加模式（断点续传），false = 截断创建（新下载）
    */
-  private openFileFd(append: boolean): void {
+  private async openFile(append: boolean): Promise<void> {
     try {
       if (append) {
         // 断点续传：以追加模式打开，不截断已有数据
-        this.fileFd = fileIo.openSync(
+        this.file = await fileIo.open(
           this.filePath,
           fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.APPEND | fileIo.OpenMode.CREATE
         );
       } else {
         // 新下载：截断创建
-        this.fileFd = fileIo.openSync(
+        this.file = await fileIo.open(
           this.filePath,
           fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC
         );
@@ -370,16 +375,19 @@ export class DownloadTask {
   }
 
   /**
-   * 安全关闭文件描述符
+   * 安全关闭文件（等待写队列排空后关闭，不阻塞主线程）
    */
-  private closeFileFd(): void {
-    if (this.fileFd >= 0) {
+  private async closeFile(): Promise<void> {
+    if (this.file) {
+      // 等待所有排队的写操作完成
+      await this.writeQueue;
       try {
-        fileIo.closeSync(this.fileFd);
+        await fileIo.close(this.file);
       } catch (err) {
         console.warn(`[DownloadTask] 关闭文件异常: ${JSON.stringify(err)}`);
       }
-      this.fileFd = -1;
+      this.file = null;
+      this.writeQueue = Promise.resolve();
     }
   }
 
