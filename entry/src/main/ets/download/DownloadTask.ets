@@ -13,8 +13,8 @@
  * 因此改用 http 模块完全自主控制 HTTP 行为。
  */
 
-import { http } from '@ohos.net.http';
-import { fileIo } from '@ohos.file.fs';
+import http from '@ohos.net.http';
+import fileIo from '@ohos.file.fs';
 import {
   DownloadCallbacks,
   DownloadConfig,
@@ -64,6 +64,8 @@ export class DownloadTask {
 
   /** 是否已销毁 */
   private destroyed: boolean = false;
+  /** 是否已主动暂停（禁止重试） */
+  private stopped: boolean = false;
 
   constructor(config: DownloadConfig, callbacks: DownloadCallbacks, filesDir: string) {
     this.config = config;
@@ -114,7 +116,45 @@ export class DownloadTask {
   }
 
   /**
+   * 初始化 taskId（同步，不启动下载）
+   */
+  initTaskId(): void {
+    if (!this.tid) {
+      this.tid = this.generateTaskId();
+    }
+  }
+
+  /**
+   * 启动下载（异步，不阻塞调用者）
+   *
+   * 前提：已通过 initTaskId() 或 recover() 设置 taskId。
+   * startsFrom 为 0 时是新下载，>0 时是断点续传。
+   */
+  async startDownload(): Promise<void> {
+    if (this.destroyed) {
+      return;
+    }
+
+    try {
+      console.info(`[DownloadTask] startDownload 开始, taskId: ${this.tid}, 文件: ${this.filePath}`);
+      this.setState(DownloadState.DOWNLOADING);
+      await this.startHttpDownload(this.downloadedBytes);
+      const now = Date.now();
+      this.lastPersistTime = now;
+
+      await this.persistTaskInfo();
+      console.info(`[DownloadTask] 下载启动成功, taskId: ${this.tid}`);
+    } catch (err) {
+      const msg = `启动下载失败: ${JSON.stringify(err)}`;
+      console.error(`[DownloadTask] ${msg}`);
+      await this.handleFailure(msg);
+    }
+  }
+
+  /**
    * 创建并启动下载任务（新任务，begins=0）
+   *
+   * @deprecated 推荐用 initTaskId() + startDownload() 分离式调用
    */
   async start(): Promise<void> {
     if (this.destroyed) {
@@ -123,12 +163,11 @@ export class DownloadTask {
 
     try {
       this.tid = this.generateTaskId();
-      await this.startHttpDownload(0);
       this.setState(DownloadState.DOWNLOADING);
+      await this.startHttpDownload(0);
       const now = Date.now();
       this.lastPersistTime = now;
 
-      // 持久化任务信息
       await this.persistTaskInfo();
       console.info(`[DownloadTask] 下载启动成功, taskId: ${this.tid}`);
     } catch (err) {
@@ -142,17 +181,19 @@ export class DownloadTask {
    * 暂停下载 — 关闭 HTTP 连接和文件描述符
    */
   async pause(): Promise<void> {
-    if (this.state !== DownloadState.DOWNLOADING) {
-      return;
-    }
+    console.info(`[DownloadTask] pause() 被调用, 当前状态: ${this.state}, taskId: ${this.tid}`);
 
+    // 标记停止，禁止重试
+    this.stopped = true;
+    this.clearRetryTimer();
+    // 直接暴力暂停：不管状态如何，都断连接关文件
+    this.setState(DownloadState.PAUSED);
     this.destroyHttpRequest();
     await this.closeFile();
-    this.setState(DownloadState.PAUSED);
     await updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
       this.totalBytes);
     this.callbacks.onPaused?.(this.tid);
-    console.info(`[DownloadTask] 已暂停, taskId: ${this.tid}, 已下载: ${this.downloadedBytes}`);
+    console.info(`[DownloadTask] 已暂停完成, taskId: ${this.tid}, 已下载: ${this.downloadedBytes}`);
   }
 
   /**
@@ -165,19 +206,24 @@ export class DownloadTask {
       return;
     }
 
-    try {
-      await this.startHttpDownload(this.downloadedBytes);
-      this.setState(DownloadState.DOWNLOADING);
+    // 清除停止标志，允许重试
+    this.stopped = false;
+    // 先改状态，再异步启动下载（不阻塞 UI）
+    this.setState(DownloadState.DOWNLOADING);
+    this.retryCount = 0;
+
+    this.startHttpDownload(this.downloadedBytes).then(() => {
       const now = Date.now();
       this.lastPersistTime = now;
-      this.retryCount = 0;
-      await this.persistTaskInfo();
+      this.persistTaskInfo().catch((_e: Error) => {
+        // 持久化失败不影响主流程
+      });
       console.info(`[DownloadTask] 已恢复下载（Range: bytes=${this.downloadedBytes}-）, taskId: ${this.tid}`);
-    } catch (err) {
-      const msg = `恢复下载失败: ${JSON.stringify(err)}`;
+    }).catch((err: Error) => {
+      const msg = `恢复下载失败: ${err.message}`;
       console.error(`[DownloadTask] ${msg}`);
-      await this.handleFailure(msg);
-    }
+      this.handleFailure(msg);
+    });
   }
 
   /**
@@ -248,10 +294,18 @@ export class DownloadTask {
    * @param begins 起始字节偏移（0 = 新下载，>0 = 断点续传）
    */
   private async startHttpDownload(begins: number): Promise<void> {
-    // 清理旧资源（异步，不阻塞主线程）
+    // 清理旧资源
     this.destroyHttpRequest();
     await this.closeFile();
     await this.openFile(begins > 0);
+    console.info(`[DownloadTask] 文件已打开: ${this.filePath}, taskId: ${this.tid}`);
+
+    // 状态检查：如果调用者在等待 openFile 期间暂停了，立即中止
+    if (this.state !== DownloadState.DOWNLOADING) {
+      console.info(`[DownloadTask] startHttpDownload 中止，当前状态: ${this.state}`);
+      await this.closeFile();
+      return; // 不抛异常，静默退出
+    }
 
     // 构建请求头：断点续传时添加 Range
     const headers: Record<string, string> = {};
@@ -268,19 +322,34 @@ export class DownloadTask {
     }
 
     return new Promise<void>((resolve, reject) => {
+      // 二次检查（Promise 构造器执行前可能又被暂停了）
+      if (this.state !== DownloadState.DOWNLOADING) {
+        console.info(`[DownloadTask] startHttpDownload 在发起请求前中止，当前状态: ${this.state}`);
+        resolve();
+        return;
+      }
+
       // 创建 HTTP 请求
       this.httpRequest = http.createHttp();
 
       // ── dataReceive: 异步顺序写入文件，不阻塞主线程 ──
+      let receiveCount = 0;
       this.httpRequest.on('dataReceive', (data: ArrayBuffer) => {
-        if (this.destroyed || !this.file) {
+        if (this.destroyed || this.stopped || !this.file) {
           return;
+        }
+        receiveCount++;
+        if (receiveCount === 1 || receiveCount % 50 === 0) {
+          console.info(`[DownloadTask] dataReceive #${receiveCount}, size=${data.byteLength}, 已下载=${this.downloadedBytes}, taskId: ${this.tid}`);
         }
         // 用写队列保证写入顺序（后一块必须等前一块写完）
         this.writeQueue = this.writeQueue.then(async () => {
           await fileIo.write(this.file!.fd, data);
           this.downloadedBytes += data.byteLength;
-          await this.updateProgressCallback();
+          // 暂停后跳过回调，但数据照样写盘
+          if (!this.stopped) {
+            await this.updateProgressCallback();
+          }
         }).catch((err: Error) => {
           console.error(`[DownloadTask] 写文件失败: ${err.message}`);
           reject(new Error(`写文件失败: ${err.message}`));
@@ -290,6 +359,7 @@ export class DownloadTask {
       // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
       this.httpRequest.on('dataReceiveProgress',
         (progress: HttpProgressData) => {
+        console.info(`[DownloadTask] dataReceiveProgress: receiveSize=${progress.receiveSize}, totalSize=${progress.totalSize}, taskId: ${this.tid}`);
         if (progress.totalSize > 0) {
           // Content-Length 语义：
           // - 新下载 (begins=0): Content-Length = 完整文件大小
@@ -297,12 +367,13 @@ export class DownloadTask {
           this.totalBytes = begins > 0 ?
             begins + progress.totalSize :
             progress.totalSize;
+          console.info(`[DownloadTask] totalBytes 已设置: ${this.totalBytes}, taskId: ${this.tid}`);
         }
       });
 
       // ── dataEnd: 下载完成 ──
       this.httpRequest.on('dataEnd', async () => {
-        if (this.destroyed) {
+        if (this.destroyed || this.stopped) {
           return;
         }
         // 等待所有排队的写操作完成
@@ -321,7 +392,7 @@ export class DownloadTask {
       }).then((_responseCode: number) => {
         // 流式响应：dataEnd 中处理完成逻辑
       }).catch(async (err: Error) => {
-        if (this.destroyed) {
+        if (this.destroyed || this.stopped) {
           return;
         }
         await this.writeQueue;
@@ -358,7 +429,7 @@ export class DownloadTask {
       console.info(`[DownloadTask] 文件已打开: ${this.filePath}, append=${append}`);
     } catch (err) {
       console.error(`[DownloadTask] 打开文件失败: ${JSON.stringify(err)}`);
-      throw err;
+      throw new Error(`打开文件失败: ${JSON.stringify(err)}`);
     }
   }
 
@@ -409,13 +480,19 @@ export class DownloadTask {
     // 每 5 秒持久化一次进度
     const persistDelta = now - this.lastPersistTime;
     if (persistDelta >= PERSIST_INTERVAL) {
+      console.info(`[DownloadTask] 持久化进度: ${this.downloadedBytes}/${this.totalBytes}, taskId: ${this.tid}`);
       await updateTaskState(this.filesDir, this.tid, DownloadState.DOWNLOADING,
         this.downloadedBytes, this.totalBytes);
       this.lastPersistTime = now;
     }
 
     // 触发进度回调
-    this.callbacks.onProgress?.(this.getProgress());
+    const progress = this.getProgress();
+    if (progress.downloadedBytes > 0 && progress.downloadedBytes % (100 * 1024) < 8192) {
+      // 每约 100KB 打印一次进度
+      console.info(`[DownloadTask] 进度回调: ${progress.downloadedBytes}/${progress.totalBytes} (${progress.progress}%), taskId: ${this.tid}`);
+    }
+    this.callbacks.onProgress?.(progress);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -451,6 +528,14 @@ export class DownloadTask {
       return;
     }
 
+    // 用户主动暂停/取消 → 不重试
+    if (this.stopped ||
+        this.state === DownloadState.PAUSED ||
+        this.state === DownloadState.CANCELLED) {
+      console.info(`[DownloadTask] 任务已暂停/取消，跳过重试: ${this.tid}`);
+      return;
+    }
+
     if (this.retryCount < this.maxRetries) {
       this.retryCount++;
       const delay = this.retryDelay * this.retryCount; // 递增延迟
@@ -474,6 +559,14 @@ export class DownloadTask {
    */
   private async retryResume(): Promise<void> {
     if (this.destroyed) {
+      return;
+    }
+
+    // 用户已主动暂停/取消 → 不重试
+    if (this.stopped ||
+        this.state === DownloadState.PAUSED ||
+        this.state === DownloadState.CANCELLED) {
+      console.info(`[DownloadTask] 任务已暂停/取消，取消重试: ${this.tid}`);
       return;
     }
 

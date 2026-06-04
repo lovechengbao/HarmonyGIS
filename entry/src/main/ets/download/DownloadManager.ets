@@ -17,7 +17,7 @@
  * 5. 退出前：await mgr.onDestroy()
  */
 
-import { fileIo } from '@ohos.file.fs';
+import fileIo from '@ohos.file.fs';
 import { DownloadTask } from './DownloadTask';
 import {
   DownloadCallbacks,
@@ -159,7 +159,7 @@ export class DownloadManager {
    */
   async createTask(config: DownloadConfig, callbacks?: DownloadCallbacks): Promise<string> {
     // 检查是否已有相同 URL + filePath 的任务
-    const existingId = this.findExistingTask(config.url, config.saveDir + '/' + config.fileName);
+    const existingId = await this.findExistingTask(config.url, config.saveDir + '/' + config.fileName);
     if (existingId) {
       const existingTask = this.activeTasks.get(existingId);
       if (existingTask) {
@@ -192,21 +192,20 @@ export class DownloadManager {
     // 检查并发限制
     const activeCount = this.countDownloadingTasks();
 
+    // 生成 taskId（同步，不阻塞）
+    task.initTaskId();
+    const tid = task.getTaskId();
+
+    const realCallbacks = this.buildTaskCallbacks(tid);
+    task.setCallbacks(realCallbacks);
+
     if (activeCount >= this.maxConcurrency) {
-      // 先创建任务获取 taskId，然后暂停并加入队列
-      await task.start();
-      const tid = task.getTaskId();
-
-      // 更新回调中的 taskId
-      const realCallbacks = this.buildTaskCallbacks(tid);
-      task.setCallbacks(realCallbacks);
-
-      await task.pause();
+      // 并发已满：设为 PAUSED 后加入等待队列
+      task.recover(tid, 0, -1);
       this.activeTasks.set(tid, task);
       this.taskConfigs.set(tid, config);
       this.taskCallbacks.set(tid, realCallbacks);
 
-      // 保存任务信息到持久化
       await saveTaskInfo(this.filesDir, {
         taskId: tid,
         url: config.url,
@@ -225,16 +224,29 @@ export class DownloadManager {
       return tid;
     }
 
-    // 直接启动
-    await task.start();
-
-    const tid = task.getTaskId();
-    const realCallbacks = this.buildTaskCallbacks(tid);
-    task.setCallbacks(realCallbacks);
-
+    // 直接启动：注册 + 异步开始下载（不 await，UI 立即响应）
     this.activeTasks.set(tid, task);
     this.taskConfigs.set(tid, config);
     this.taskCallbacks.set(tid, realCallbacks);
+
+    // 持久化初始信息
+    await saveTaskInfo(this.filesDir, {
+      taskId: tid,
+      url: config.url,
+      filePath: config.saveDir + '/' + config.fileName,
+      downloadedBytes: 0,
+      totalBytes: -1,
+      state: DownloadState.DOWNLOADING,
+      label: config.label ?? '',
+      metadata: config.metadata ?? {},
+      createTime: Date.now(),
+      updateTime: Date.now()
+    });
+
+    // 异步启动下载（不阻塞 createTask 返回）
+    task.startDownload().catch((err: Error) => {
+      console.error(`[DownloadManager] 启动下载失败: ${err.message}`);
+    });
 
     console.info(`[DownloadManager] 创建并启动任务: ${tid}`);
     return tid;
@@ -344,11 +356,11 @@ export class DownloadManager {
    * 恢复所有已暂停任务（受并发限制）
    */
   async resumeAll(): Promise<void> {
-    for (const [taskId, task] of this.activeTasks.entries()) {
+    this.activeTasks.forEach((task: DownloadTask, tid: string) => {
       if (task.getState() === DownloadState.PAUSED) {
-        this.pendingQueue.push(taskId);
+        this.pendingQueue.push(tid);
       }
-    }
+    });
     this.processPendingQueue();
     console.info('[DownloadManager] 开始恢复所有任务');
   }
@@ -391,9 +403,9 @@ export class DownloadManager {
    */
   getAllProgress(): DownloadProgress[] {
     const progressList: DownloadProgress[] = [];
-    for (const task of this.activeTasks.values()) {
+    this.activeTasks.forEach((task: DownloadTask) => {
       progressList.push(task.getProgress());
-    }
+    });
     return progressList;
   }
 
@@ -407,12 +419,14 @@ export class DownloadManager {
     let completed = 0;
     let failed = 0;
 
-    for (const task of this.activeTasks.values()) {
+    this.activeTasks.forEach((task: DownloadTask) => {
       const progress = task.getProgress();
       totalDownloaded += progress.downloadedBytes;
       if (progress.totalBytes > 0) {
         totalSize += progress.totalBytes;
       }
+
+      console.info(`[DownloadManager] getSummary: task state=${progress.state}, downloaded=${progress.downloadedBytes}, total=${progress.totalBytes}`);
 
       switch (progress.state) {
         case DownloadState.DOWNLOADING:
@@ -425,13 +439,13 @@ export class DownloadManager {
           failed++;
           break;
       }
-    }
+    });
 
     const overallProgress = totalSize > 0 ?
       Math.round((totalDownloaded / totalSize) * 100) :
       0;
 
-    return {
+    const summary: DownloadSummary = {
       totalTasks: this.activeTasks.size,
       activeTasks: active,
       completedTasks: completed,
@@ -440,6 +454,7 @@ export class DownloadManager {
       totalBytes: totalSize,
       overallProgress: overallProgress
     };
+    return summary;
   }
 
   /**
@@ -464,11 +479,13 @@ export class DownloadManager {
   async onDestroy(): Promise<void> {
     console.info('[DownloadManager] onDestroy — 暂停所有活跃任务...');
 
-    for (const [taskId, task] of this.activeTasks.entries()) {
+    const destroyPromises: Promise<void>[] = [];
+    this.activeTasks.forEach((task: DownloadTask, _tid: string) => {
       if (task.getState() === DownloadState.DOWNLOADING) {
-        await task.destroy(); // 暂停但不删除，保留 taskId 供下次恢复
+        destroyPromises.push(task.destroy());
       }
-    }
+    });
+    await Promise.all(destroyPromises);
 
     this.pendingQueue = [];
     console.info(`[DownloadManager] 已销毁。活跃任务数: ${this.activeTasks.size}`);
@@ -589,16 +606,21 @@ export class DownloadManager {
   /**
    * 查找已存在的任务（根据 URL + filePath）
    */
-  private findExistingTask(url: string, filePath: string): string | null {
-    for (const [taskId, task] of this.activeTasks.entries()) {
+  private async findExistingTask(url: string, filePath: string): Promise<string | null> {
+    let existing: string | null = null;
+    this.activeTasks.forEach((task: DownloadTask, tid: string) => {
       if (task.getFilePath() === filePath) {
-        return taskId;
+        existing = tid;
       }
+    });
+    if (existing !== null) {
+      return existing;
     }
 
     // 也检查持久化中的已完成任务
     const allInfos = await getAllTaskInfos(this.filesDir);
-    for (const info of allInfos) {
+    for (let i = 0; i < allInfos.length; i++) {
+      const info = allInfos[i];
       if (info.filePath === filePath && info.state === DownloadState.COMPLETED) {
         return info.taskId;
       }

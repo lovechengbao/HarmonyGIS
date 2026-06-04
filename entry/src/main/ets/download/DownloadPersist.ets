@@ -7,7 +7,7 @@
  * 重启后从持久化恢复，resume 时通过 HTTP Range 头实现断点续传。
  */
 
-import { fileIo } from '@ohos.file.fs';
+import fileIo from '@ohos.file.fs';
 import { DownloadTaskInfo, DownloadState, PersistRecord } from './DownloadTypes';
 
 const PERSIST_FILE = 'harmonygis_downloads.json';
@@ -20,11 +20,11 @@ export async function loadPersistRecord(filesDir: string): Promise<PersistRecord
   const filePath = filesDir + '/' + PERSIST_FILE;
 
   try {
-    const stat = fileIo.statSync(filePath);
+    const stat: fileIo.Stat = fileIo.statSync(filePath);
     if (!stat.isFile()) {
       return createEmptyRecord();
     }
-    const content = fileIo.readTextSync(filePath);
+    const content: string = fileIo.readTextSync(filePath);
     if (!content || content.trim().length === 0) {
       return createEmptyRecord();
     }
@@ -49,7 +49,7 @@ export function savePersistRecord(filesDir: string, record: PersistRecord): void
 
   try {
     const content = JSON.stringify(record);
-    const file = fileIo.openSync(filePath, fileIo.OpenMode.CREATE |
+    const file: fileIo.File = fileIo.openSync(filePath, fileIo.OpenMode.CREATE |
       fileIo.OpenMode.WRITE_ONLY |
       fileIo.OpenMode.TRUNC);
     fileIo.writeSync(file.fd, content);

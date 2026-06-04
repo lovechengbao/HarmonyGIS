@@ -34,24 +34,24 @@
  * - 文件：@ohos.file.fs（open/write/close）
  */
 
-import { http } from '@ohos.net.http';
-import { fileIo as fs } from '@ohos.file.fs';
+import http from '@ohos.net.http';
+import fs from '@ohos.file.fs';
 import { HttpProgressData } from './DownloadTypes';
 
-/** 进度回调 */
-export interface ResumeProgressCallback {
-  (downloaded: number, total: number): void;
+/** 进度快照 */
+export interface ProgressSnapshot {
+  downloaded: number;
+  total: number;
 }
+
+/** 进度回调 */
+export type ResumeProgressCallback = (downloaded: number, total: number) => void;
 
 /** 完成回调 */
-export interface ResumeCompleteCallback {
-  (filePath: string): void;
-}
+export type ResumeCompleteCallback = (filePath: string) => void;
 
 /** 错误回调 */
-export interface ResumeErrorCallback {
-  (error: string): void;
-}
+export type ResumeErrorCallback = (error: string) => void;
 
 /** 下载器构造选项 */
 export interface HttpResumeDownloaderOptions {
@@ -159,11 +159,12 @@ export class HttpResumeDownloader {
   /**
    * 获取进度快照
    */
-  getProgress(): { downloaded: number; total: number } {
-    return {
+  getProgress(): ProgressSnapshot {
+    const snapshot: ProgressSnapshot = {
       downloaded: this.downloadedBytes,
       total: this.totalBytes
     };
+    return snapshot;
   }
 
   /**
@@ -210,7 +211,7 @@ export class HttpResumeDownloader {
   /**
    * 暂停下载 — 关闭 HTTP 连接，保留已下载文件
    */
-  pause(): void {
+  async pause(): Promise<void> {
     if (this.state !== ResumeDownloaderState.DOWNLOADING) {
       return;
     }
@@ -249,7 +250,7 @@ export class HttpResumeDownloader {
   /**
    * 重置下载器状态（不清除本地文件）
    */
-  reset(): void {
+  async reset(): Promise<void> {
     this.destroyHttpRequest();
     await this.closeFile();
     this.state = ResumeDownloaderState.IDLE;
@@ -358,7 +359,7 @@ export class HttpResumeDownloader {
    */
   private async checkFileSize(): Promise<number> {
     try {
-      const stat = await fs.stat(this.filePath);
+      const stat: fs.Stat = await fs.stat(this.filePath);
       if (stat.size > 0) {
         console.info(`[HttpResumeDownloader] 检测到已有文件, size=${stat.size}`);
         return stat.size;
@@ -390,7 +391,7 @@ export class HttpResumeDownloader {
       console.info(`[HttpResumeDownloader] 文件已打开, append=${this.startByte > 0}`);
     } catch (err) {
       console.error(`[HttpResumeDownloader] 打开文件失败: ${JSON.stringify(err)}`);
-      throw err;
+      throw new Error(`打开文件失败: ${JSON.stringify(err)}`);
     }
   }
 

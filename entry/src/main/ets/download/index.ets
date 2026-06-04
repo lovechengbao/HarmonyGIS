@@ -56,6 +56,7 @@ export type {
 export { HttpResumeDownloader, ResumeDownloaderState } from './HttpResumeDownloader';
 export type {
   HttpResumeDownloaderOptions,
+  ProgressSnapshot,
   ResumeProgressCallback,
   ResumeCompleteCallback,
   ResumeErrorCallback
