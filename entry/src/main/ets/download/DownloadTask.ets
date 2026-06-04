@@ -23,8 +23,6 @@ import {
 } from './DownloadTypes';
 import { saveTaskInfo, removeTaskInfo, updateTaskState } from './DownloadPersist';
 
-/** 速度计算采样间隔 (ms) */
-const SPEED_SAMPLE_INTERVAL = 1000;
 /** 进度持久化间隔 (ms) */
 const PERSIST_INTERVAL = 5000;
 /** 默认最大重试次数 */
@@ -53,10 +51,7 @@ export class DownloadTask {
   // ── 进度跟踪 ──
   private downloadedBytes: number = 0;
   private totalBytes: number = -1;
-  private lastSpeedSampleTime: number = 0;
-  private lastSpeedSampleBytes: number = 0;
   private lastPersistTime: number = 0;
-  private currentSpeed: number = 0;
 
   // ── 重试 ──
   private retryCount: number = 0;
@@ -103,7 +98,6 @@ export class DownloadTask {
       state: this.state,
       downloadedBytes: this.downloadedBytes,
       totalBytes: this.totalBytes,
-      speed: this.currentSpeed,
       progress: progress,
       updateTime: Date.now()
     };
@@ -129,8 +123,6 @@ export class DownloadTask {
       await this.startHttpDownload(0);
       this.setState(DownloadState.DOWNLOADING);
       const now = Date.now();
-      this.lastSpeedSampleTime = now;
-      this.lastSpeedSampleBytes = 0;
       this.lastPersistTime = now;
 
       // 持久化任务信息
@@ -174,8 +166,6 @@ export class DownloadTask {
       await this.startHttpDownload(this.downloadedBytes);
       this.setState(DownloadState.DOWNLOADING);
       const now = Date.now();
-      this.lastSpeedSampleTime = now;
-      this.lastSpeedSampleBytes = this.downloadedBytes;
       this.lastPersistTime = now;
       this.retryCount = 0;
       await this.persistTaskInfo();
@@ -415,21 +405,10 @@ export class DownloadTask {
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 更新进度回调（计算速度 + 定期持久化）
+   * 更新进度回调（定期持久化）
    */
   private async updateProgressCallback(): Promise<void> {
     const now = Date.now();
-
-    // 每秒更新一次速度
-    const speedDelta = now - this.lastSpeedSampleTime;
-    if (speedDelta >= SPEED_SAMPLE_INTERVAL) {
-      const bytesDelta = this.downloadedBytes - this.lastSpeedSampleBytes;
-      this.currentSpeed = speedDelta > 0 ?
-        Math.round((bytesDelta / speedDelta) * 1000) :
-        0;
-      this.lastSpeedSampleTime = now;
-      this.lastSpeedSampleBytes = this.downloadedBytes;
-    }
 
     // 每 5 秒持久化一次进度
     const persistDelta = now - this.lastPersistTime;
@@ -457,7 +436,6 @@ export class DownloadTask {
 
     this.clearRetryTimer();
     this.downloadedBytes = this.totalBytes;
-    this.currentSpeed = 0;
 
     this.setState(DownloadState.COMPLETED);
     await updateTaskState(this.filesDir, this.tid, DownloadState.COMPLETED,

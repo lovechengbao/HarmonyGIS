@@ -13,8 +13,8 @@
  *   context.filesDir + '/maps/beijing.mbtiles'
  * );
  *
- * downloader.onProgress((downloaded, total, speed) => {
- *   console.log(`${downloaded}/${total} @ ${speed} B/s`);
+ * downloader.onProgress((downloaded, total) => {
+ *   console.log(`${downloaded}/${total}`);
  * });
  * downloader.onComplete((path) => {
  *   console.log('下载完成:', path);
@@ -39,7 +39,7 @@ import { fileIo as fs } from '@ohos.file.fs';
 
 /** 进度回调 */
 export interface ResumeProgressCallback {
-  (downloaded: number, total: number, speed: number): void;
+  (downloaded: number, total: number): void;
 }
 
 /** 完成回调 */
@@ -87,11 +87,6 @@ export class HttpResumeDownloader {
   private downloadedBytes: number = 0;
   private totalBytes: number = -1;
 
-  // ── 速度跟踪 ──
-  private lastSpeedTime: number = 0;
-  private lastSpeedBytes: number = 0;
-  private currentSpeed: number = 0;
-
   // ── 回调 ──
   private progressCallback: ResumeProgressCallback | null = null;
   private completeCallback: ResumeCompleteCallback | null = null;
@@ -128,7 +123,7 @@ export class HttpResumeDownloader {
   /**
    * 注册进度回调
    *
-   * @param callback (downloadedBytes, totalBytes, speedBytesPerSecond)
+   * @param callback (downloadedBytes, totalBytes)
    */
   onProgress(callback: ResumeProgressCallback): void {
     this.progressCallback = callback;
@@ -158,11 +153,10 @@ export class HttpResumeDownloader {
   /**
    * 获取进度快照
    */
-  getProgress(): { downloaded: number; total: number; speed: number } {
+  getProgress(): { downloaded: number; total: number } {
     return {
       downloaded: this.downloadedBytes,
-      total: this.totalBytes,
-      speed: this.currentSpeed
+      total: this.totalBytes
     };
   }
 
@@ -256,7 +250,6 @@ export class HttpResumeDownloader {
     this.startByte = 0;
     this.downloadedBytes = 0;
     this.totalBytes = -1;
-    this.currentSpeed = 0;
     this.shouldStop = false;
   }
 
@@ -298,9 +291,7 @@ export class HttpResumeDownloader {
         }
         try {
           fs.writeSync(this.fileFd, data);
-          const chunkSize = data.byteLength;
-          this.downloadedBytes += chunkSize;
-          this.updateSpeed(chunkSize);
+          this.downloadedBytes += data.byteLength;
           this.notifyProgress();
         } catch (err) {
           console.error(`[HttpResumeDownloader] 写文件失败: ${JSON.stringify(err)}`);
@@ -439,31 +430,14 @@ export class HttpResumeDownloader {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 进度 & 速度
+  // 进度
   // ═══════════════════════════════════════════════════════════
-
-  /**
-   * 更新速度统计
-   */
-  private updateSpeed(chunkSize: number): void {
-    const now = Date.now();
-    const delta = now - this.lastSpeedTime;
-
-    if (delta >= 1000) {
-      const bytesDelta = this.downloadedBytes - this.lastSpeedBytes;
-      this.currentSpeed = delta > 0 ?
-        Math.round((bytesDelta / delta) * 1000) :
-        0;
-      this.lastSpeedTime = now;
-      this.lastSpeedBytes = this.downloadedBytes;
-    }
-  }
 
   /**
    * 通知进度回调
    */
   private notifyProgress(): void {
-    this.progressCallback?.(this.downloadedBytes, this.totalBytes, this.currentSpeed);
+    this.progressCallback?.(this.downloadedBytes, this.totalBytes);
   }
 
   // ═══════════════════════════════════════════════════════════

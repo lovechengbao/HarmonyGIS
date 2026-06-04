@@ -66,8 +66,6 @@ export interface DownloadProgress {
   downloadedBytes: number;
   /** 总字节数（-1 表示未知） */
   totalBytes: number;
-  /** 下载速度 (bytes/s) */
-  speed: number;
   /** 进度百分比 0-100 */
   progress: number;
   /** 最后一次更新时间戳 */
