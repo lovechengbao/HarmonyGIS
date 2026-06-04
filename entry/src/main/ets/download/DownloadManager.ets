@@ -349,6 +349,31 @@ export class DownloadManager {
   }
 
   /**
+   * 获取指定任务详情
+   */
+  getTask(taskId: string): DownloadTaskInfo | null {
+    const taskInfos = getAllTaskInfos(this.filesDir);
+    // getAllTaskInfos 返回 Promise<DownloadTaskInfo[]>，但这里同步返回已有数据
+    // 从活跃任务中获取
+    const task = this.activeTasks.get(taskId);
+    if (task) {
+      return {
+        taskId: task.getTaskId(),
+        url: this.taskConfigs.get(taskId)?.url ?? '',
+        filePath: task.getFilePath(),
+        downloadedBytes: task.getProgress().downloadedBytes,
+        totalBytes: task.getProgress().totalBytes,
+        state: task.getState(),
+        label: this.taskConfigs.get(taskId)?.label ?? '',
+        metadata: this.taskConfigs.get(taskId)?.metadata ?? {},
+        createTime: 0,
+        updateTime: Date.now()
+      };
+    }
+    return null;
+  }
+
+  /**
    * 获取指定任务的进度
    */
   getTaskProgress(taskId: string): DownloadProgress | null {
