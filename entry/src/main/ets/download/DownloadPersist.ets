@@ -75,7 +75,15 @@ export async function saveTaskInfo(filesDir: string, taskInfo: DownloadTaskInfo)
 export async function removeTaskInfo(filesDir: string, taskId: string): Promise<void> {
   const record = await loadPersistRecord(filesDir);
   if (record.tasks[taskId]) {
-    delete record.tasks[taskId];
+    // ArkTS 不支持 delete 运算符，用重建对象替代
+    const newTasks: Record<string, DownloadTaskInfo> = {};
+    const keys = Object.keys(record.tasks);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== taskId) {
+        newTasks[keys[i]] = record.tasks[keys[i]];
+      }
+    }
+    record.tasks = newTasks;
     savePersistRecord(filesDir, record);
   }
 }
