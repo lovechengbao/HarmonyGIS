@@ -30,7 +30,7 @@
  * ```
  *
  * 适配 HarmonyOS API 11：
- * - 网络：@ohos.net.http（流式 dataReceive/dataEnd/dataError 事件）
+ * - 网络：@ohos.net.http（流式 dataReceive/dataEnd 事件，错误通过 catch 捕获）
  * - 文件：@ohos.file.fs（open/write/close）
  */
 
@@ -326,17 +326,6 @@ export class HttpResumeDownloader {
         resolve();
       });
 
-      // ── dataError: 下载出错 ──
-      this.httpRequest.on('dataError', async (err: Error) => {
-        if (this.shouldStop) {
-          resolve();
-          return;
-        }
-        await this.writeQueue;
-        await this.closeFile();
-        reject(err);
-      });
-
       // ── 发起流式请求（API 11: requestInStream）──
       this.httpRequest.requestInStream(this.url, {
         method: http.RequestMethod.GET,
@@ -427,7 +416,6 @@ export class HttpResumeDownloader {
         this.httpRequest.off('dataReceive');
         this.httpRequest.off('dataReceiveProgress');
         this.httpRequest.off('dataEnd');
-        this.httpRequest.off('dataError');
         this.httpRequest.destroy();
       } catch (err) {
         console.warn(`[HttpResumeDownloader] 销毁 HTTP 请求异常: ${JSON.stringify(err)}`);

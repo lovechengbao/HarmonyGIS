@@ -312,18 +312,6 @@ export class DownloadTask {
         resolve();
       });
 
-      // ── dataError: 下载出错 ──
-      this.httpRequest.on('dataError', async (err: Error) => {
-        if (this.destroyed) {
-          return;
-        }
-        await this.writeQueue;
-        await this.closeFile();
-        const errMsg = err?.message ?? JSON.stringify(err);
-        console.error(`[DownloadTask] HTTP 数据错误: ${errMsg}`);
-        reject(new Error(errMsg));
-      });
-
       // ── 发起流式请求（API 11: requestInStream）──
       this.httpRequest.requestInStream(this.config.url, {
         method: http.RequestMethod.GET,
@@ -400,7 +388,6 @@ export class DownloadTask {
         this.httpRequest.off('dataReceive');
         this.httpRequest.off('dataReceiveProgress');
         this.httpRequest.off('dataEnd');
-        this.httpRequest.off('dataError');
         this.httpRequest.destroy();
       } catch (err) {
         console.warn(`[DownloadTask] 销毁 HTTP 请求异常: ${JSON.stringify(err)}`);
