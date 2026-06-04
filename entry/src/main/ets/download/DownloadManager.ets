@@ -36,6 +36,11 @@ import {
 /** 默认最大并发下载数 */
 const DEFAULT_MAX_CONCURRENCY = 3;
 
+/** 管理器初始化选项 */
+export interface DownloadManagerOptions {
+  maxConcurrency?: number;
+}
+
 /** 全局进度回调 */
 export interface GlobalCallbacks {
   /** 所有任务进度总和 */
@@ -83,7 +88,7 @@ export class DownloadManager {
    * @param filesDir 应用沙箱 filesDir（用于持久化和文件保存）
    * @param options 可选配置
    */
-  constructor(filesDir: string, options?: { maxConcurrency?: number }) {
+  constructor(filesDir: string, options?: DownloadManagerOptions) {
     this.filesDir = filesDir;
     this.maxConcurrency = options?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
   }

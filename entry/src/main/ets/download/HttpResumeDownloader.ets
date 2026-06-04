@@ -53,6 +53,13 @@ export interface ResumeErrorCallback {
   (error: string): void;
 }
 
+/** 下载器构造选项 */
+export interface HttpResumeDownloaderOptions {
+  connectTimeout?: number;
+  readTimeout?: number;
+  headers?: Record<string, string>;
+}
+
 /** 下载器状态 */
 export enum ResumeDownloaderState {
   /** 空闲（未开始或已完成） */
@@ -106,11 +113,7 @@ export class HttpResumeDownloader {
   constructor(
     url: string,
     filePath: string,
-    options?: {
-      connectTimeout?: number;
-      readTimeout?: number;
-      headers?: Record<string, string>;
-    }
+    options?: HttpResumeDownloaderOptions
   ) {
     this.url = url;
     this.filePath = filePath;

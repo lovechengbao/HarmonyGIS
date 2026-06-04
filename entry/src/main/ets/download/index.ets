@@ -34,7 +34,7 @@
  */
 
 export { DownloadManager } from './DownloadManager';
-export type { GlobalCallbacks, DownloadSummary } from './DownloadManager';
+export type { DownloadManagerOptions, GlobalCallbacks, DownloadSummary } from './DownloadManager';
 
 export { DownloadTask } from './DownloadTask';
 
@@ -55,6 +55,7 @@ export type {
 
 export { HttpResumeDownloader, ResumeDownloaderState } from './HttpResumeDownloader';
 export type {
+  HttpResumeDownloaderOptions,
   ResumeProgressCallback,
   ResumeCompleteCallback,
   ResumeErrorCallback
