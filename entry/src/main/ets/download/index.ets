@@ -52,6 +52,13 @@ export type {
   PersistRecord
 } from './DownloadTypes';
 
+export { HttpResumeDownloader, ResumeDownloaderState } from './HttpResumeDownloader';
+export type {
+  ResumeProgressCallback,
+  ResumeCompleteCallback,
+  ResumeErrorCallback
+} from './HttpResumeDownloader';
+
 export {
   loadPersistRecord,
   savePersistRecord,
