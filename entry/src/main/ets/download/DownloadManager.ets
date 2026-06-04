@@ -17,7 +17,7 @@
  * 5. 退出前：await mgr.onDestroy()
  */
 
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo } from '@ohos.file.fs';
 import { DownloadTask } from './DownloadTask';
 import {
   DownloadCallbacks,

@@ -7,7 +7,7 @@
  * 重启后从持久化恢复，resume 时通过 HTTP Range 头实现断点续传。
  */
 
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo } from '@ohos.file.fs';
 import { DownloadTaskInfo, DownloadState, PersistRecord } from './DownloadTypes';
 
 const PERSIST_FILE = 'harmonygis_downloads.json';

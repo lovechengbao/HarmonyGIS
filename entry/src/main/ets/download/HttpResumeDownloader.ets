@@ -34,8 +34,8 @@
  * - 文件：@ohos.file.fs（open/write/close）
  */
 
-import { http } from '@kit.NetworkKit';
-import { fileIo as fs } from '@kit.CoreFileKit';
+import { http } from '@ohos.net.http';
+import { fileIo as fs } from '@ohos.file.fs';
 
 /** 进度回调 */
 export interface ResumeProgressCallback {
@@ -308,8 +308,8 @@ export class HttpResumeDownloader {
         }
       });
 
-      // ── dataProgress: 获取总大小 ──
-      this.httpRequest.on('dataProgress',
+      // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
+      this.httpRequest.on('dataReceiveProgress',
         (progress: { receiveSize: number; totalSize: number }) => {
         if (progress.totalSize > 0) {
           // Content-Length 语义：
@@ -342,13 +342,14 @@ export class HttpResumeDownloader {
         reject(err);
       });
 
-      // ── 发起请求 ──
-      this.httpRequest.request(this.url, {
+      // ── 发起流式请求（API 11: requestInStream）──
+      this.httpRequest.requestInStream(this.url, {
         method: http.RequestMethod.GET,
         header: headers,
         connectTimeout: this.connectTimeout,
         readTimeout: this.readTimeout,
-        expectDataType: http.HttpDataType.ARRAY_BUFFER,
+      }).then((_responseCode: number) => {
+        // 流式响应：dataEnd 中处理完成逻辑
       }).catch((err: Error) => {
         if (this.shouldStop) {
           resolve();
@@ -426,7 +427,7 @@ export class HttpResumeDownloader {
     if (this.httpRequest) {
       try {
         this.httpRequest.off('dataReceive');
-        this.httpRequest.off('dataProgress');
+        this.httpRequest.off('dataReceiveProgress');
         this.httpRequest.off('dataEnd');
         this.httpRequest.off('dataError');
         this.httpRequest.destroy();
