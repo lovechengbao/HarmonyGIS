@@ -36,6 +36,7 @@
 
 import { http } from '@ohos.net.http';
 import { fileIo as fs } from '@ohos.file.fs';
+import { HttpProgressData } from './DownloadTypes';
 
 /** 进度回调 */
 export interface ResumeProgressCallback {
@@ -301,7 +302,7 @@ export class HttpResumeDownloader {
 
       // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
       this.httpRequest.on('dataReceiveProgress',
-        (progress: { receiveSize: number; totalSize: number }) => {
+        (progress: HttpProgressData) => {
         if (progress.totalSize > 0) {
           // Content-Length 语义：
           //   startByte=0 → Content-Length 是完整文件大小

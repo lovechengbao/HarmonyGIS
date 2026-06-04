@@ -49,7 +49,8 @@ export type {
   DownloadProgress,
   DownloadTaskInfo,
   DownloadCallbacks,
-  PersistRecord
+  PersistRecord,
+  HttpProgressData
 } from './DownloadTypes';
 
 export { HttpResumeDownloader, ResumeDownloaderState } from './HttpResumeDownloader';

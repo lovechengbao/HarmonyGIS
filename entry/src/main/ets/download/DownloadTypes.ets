@@ -132,3 +132,11 @@ export enum DownloadEvent {
   PAUSED = 'paused',
   REMOVED = 'removed'
 }
+
+/**
+ * HTTP 流式下载进度事件数据（dataReceiveProgress 回调参数）
+ */
+export interface HttpProgressData {
+  receiveSize: number;
+  totalSize: number;
+}

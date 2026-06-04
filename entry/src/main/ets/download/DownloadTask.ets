@@ -19,7 +19,8 @@ import {
   DownloadCallbacks,
   DownloadConfig,
   DownloadProgress,
-  DownloadState
+  DownloadState,
+  HttpProgressData
 } from './DownloadTypes';
 import { saveTaskInfo, removeTaskInfo, updateTaskState } from './DownloadPersist';
 
@@ -287,7 +288,7 @@ export class DownloadTask {
 
       // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
       this.httpRequest.on('dataReceiveProgress',
-        (progress: { receiveSize: number; totalSize: number }) => {
+        (progress: HttpProgressData) => {
         if (progress.totalSize > 0) {
           // Content-Length 语义：
           // - 新下载 (begins=0): Content-Length = 完整文件大小
