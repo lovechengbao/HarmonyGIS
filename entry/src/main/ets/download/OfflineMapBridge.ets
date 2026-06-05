@@ -1,5 +1,5 @@
 /**
- * OfflineMapBridge — 离线地图 JS Bridge 对接层
+ * OfflineMapBridge — 离线地图 JS Bridge 对接层（全静态方法）
  *
  * 提供三个对 WebView JavaScript 暴露的方法，遵循统一模式：
  * (callbackId, ...业务参数) → 委托 OfflineMap → callback(callbackId, result)
@@ -7,9 +7,10 @@
  * callback 由宿主 App 注入，内部通过 runJavaScript 将结果推回 WebView。
  *
  * 使用示例：
- *   const bridge = new OfflineMapBridge(offlineMap, (id, result) => {
+ *   OfflineMapBridge.init(offlineMap, (id, result) => {
  *     webview.runJavaScript(`CgsNativeBridge.onCallback('${id}', ${result})`);
  *   });
+ *   // JS 侧直接调用静态方法
  */
 
 import { OfflineMap } from './OfflineMap';
@@ -22,16 +23,18 @@ import { OfflineMap } from './OfflineMap';
 type JsCallback = (callbackId: string, result: number) => void;
 
 export class OfflineMapBridge {
-  private offlineMap: OfflineMap;
-  private callback: JsCallback;
+  private static offlineMap: OfflineMap;
+  private static callback: JsCallback;
 
   /**
+   * 初始化 Bridge（必须在 JS 调用前执行）
+   *
    * @param offlineMap OfflineMap 实例
    * @param callback 宿主注入的回调函数（内部调用 WebView.runJavaScript）
    */
-  constructor(offlineMap: OfflineMap, callback: JsCallback) {
-    this.offlineMap = offlineMap;
-    this.callback = callback;
+  static init(offlineMap: OfflineMap, callback: JsCallback): void {
+    OfflineMapBridge.offlineMap = offlineMap;
+    OfflineMapBridge.callback = callback;
   }
 
   /**
@@ -44,9 +47,9 @@ export class OfflineMapBridge {
    * @param mapId 地图唯一标识
    * @param append 0=覆盖下载, 1=追加/恢复（目前暂未区分，统一走断点续传逻辑）
    */
-  async downloadMap(callbackId: string, downloadurl: string, mapId: string, append: number): Promise<void> {
-    const result: number = await this.offlineMap.downloadMap(downloadurl, mapId, 'offlineMap', true);
-    this.callback(callbackId, result);
+  static async downloadMap(callbackId: string, downloadurl: string, mapId: string, append: number): Promise<void> {
+    const result: number = await OfflineMapBridge.offlineMap.downloadMap(downloadurl, mapId, 'offlineMap', true);
+    OfflineMapBridge.callback(callbackId, result);
   }
 
   /**
@@ -58,9 +61,9 @@ export class OfflineMapBridge {
    * @param callbackId JS 回调标识
    * @param mapId 地图唯一标识
    */
-  async getDownloadProgress(callbackId: string, mapId: string): Promise<void> {
-    const percent: number = this.offlineMap.getProgress(mapId);
-    this.callback(callbackId, percent);
+  static async getDownloadProgress(callbackId: string, mapId: string): Promise<void> {
+    const percent: number = OfflineMapBridge.offlineMap.getProgress(mapId);
+    OfflineMapBridge.callback(callbackId, percent);
   }
 
   /**
@@ -72,8 +75,8 @@ export class OfflineMapBridge {
    * @param callbackId JS 回调标识
    * @param mapId 地图唯一标识
    */
-  async pauseDownloadingMap(callbackId: string, mapId: string): Promise<void> {
-    await this.offlineMap.pauseDownloadingMap(mapId);
-    this.callback(callbackId, 0);
+  static async pauseDownloadingMap(callbackId: string, mapId: string): Promise<void> {
+    await OfflineMapBridge.offlineMap.pauseDownloadingMap(mapId);
+    OfflineMapBridge.callback(callbackId, 0);
   }
 }
