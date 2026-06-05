@@ -7,10 +7,9 @@
  * callback 由宿主 App 注入，内部通过 runJavaScript 将结果推回 WebView。
  *
  * 使用示例：
- *   OfflineMapBridge.init(offlineMap, (id, result) => {
+ *   OfflineMapBridge.init((id, result) => {
  *     webview.runJavaScript(`CgsNativeBridge.onCallback('${id}', ${result})`);
  *   });
- *   // JS 侧直接调用静态方法
  */
 
 import { OfflineMap } from './OfflineMap';
@@ -23,17 +22,14 @@ import { OfflineMap } from './OfflineMap';
 type JsCallback = (callbackId: string, result: number) => void;
 
 export class OfflineMapBridge {
-  private static offlineMap: OfflineMap;
   private static callback: JsCallback;
 
   /**
    * 初始化 Bridge（必须在 JS 调用前执行）
    *
-   * @param offlineMap OfflineMap 实例
    * @param callback 宿主注入的回调函数（内部调用 WebView.runJavaScript）
    */
-  static init(offlineMap: OfflineMap, callback: JsCallback): void {
-    OfflineMapBridge.offlineMap = offlineMap;
+  static init(callback: JsCallback): void {
     OfflineMapBridge.callback = callback;
   }
 
@@ -48,7 +44,7 @@ export class OfflineMapBridge {
    * @param append 0=覆盖下载, 1=追加/恢复（目前暂未区分，统一走断点续传逻辑）
    */
   static async downloadMap(callbackId: string, downloadurl: string, mapId: string, append: number): Promise<void> {
-    const result: number = await OfflineMapBridge.offlineMap.downloadMap(downloadurl, mapId, 'offlineMap', true);
+    const result: number = await OfflineMap.downloadMap(downloadurl, mapId, 'offlineMap', true);
     OfflineMapBridge.callback(callbackId, result);
   }
 
@@ -62,7 +58,7 @@ export class OfflineMapBridge {
    * @param mapId 地图唯一标识
    */
   static async getDownloadProgress(callbackId: string, mapId: string): Promise<void> {
-    const percent: number = OfflineMapBridge.offlineMap.getProgress(mapId);
+    const percent: number = OfflineMap.getProgress(mapId);
     OfflineMapBridge.callback(callbackId, percent);
   }
 
@@ -76,7 +72,7 @@ export class OfflineMapBridge {
    * @param mapId 地图唯一标识
    */
   static async pauseDownloadingMap(callbackId: string, mapId: string): Promise<void> {
-    await OfflineMapBridge.offlineMap.pauseDownloadingMap(mapId);
+    await OfflineMap.pauseDownloadingMap(mapId);
     OfflineMapBridge.callback(callbackId, 0);
   }
 }
