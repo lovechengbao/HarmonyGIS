@@ -71,3 +71,7 @@ export {
   getTaskInfo,
   updateTaskState
 } from './DownloadPersist';
+
+export { OfflineMap } from './OfflineMap';
+
+export { OfflineMapBridge } from './OfflineMapBridge';
