@@ -179,7 +179,6 @@ export class DownloadManager {
       }
     }
 
-    const effectiveCallbacks = callbacks ?? {};
     const task = this.createTaskInstance(
       config.url,
       config.saveDir + '/' + config.fileName,
@@ -196,7 +195,7 @@ export class DownloadManager {
     task.initTaskId();
     const tid = task.getTaskId();
 
-    const realCallbacks = this.buildTaskCallbacks(tid);
+    const realCallbacks = this.buildTaskCallbacks(tid, callbacks);
     task.setCallbacks(realCallbacks);
 
     if (activeCount >= this.maxConcurrency) {
