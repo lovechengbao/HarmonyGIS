@@ -126,7 +126,7 @@ export class DownloadManager {
       }
 
       // 创建任务实例并从持久化数据恢复
-      const task = this.createTaskInstance(info.url, info.filePath, info.label, info.metadata);
+      const task = this.createTaskInstance(this.infoToConfig(info));
       task.recover(info.taskId, info.downloadedBytes, info.totalBytes);
 
       // 绑定回调
@@ -179,12 +179,7 @@ export class DownloadManager {
       }
     }
 
-    const task = this.createTaskInstance(
-      config.url,
-      config.saveDir + '/' + config.fileName,
-      config.label,
-      config.metadata
-    );
+    const task = this.createTaskInstance(config);
     const wrappedCallbacks = this.buildTaskCallbacks('');
     task.setCallbacks(wrappedCallbacks);
 
@@ -549,21 +544,7 @@ export class DownloadManager {
   /**
    * 创建 DownloadTask 实例
    */
-  private createTaskInstance(url: string, filePath: string, label?: string,
-    metadata?: Record<string, string>): DownloadTask {
-    // 从 filePath 中拆分 saveDir 和 fileName
-    const lastSlash = filePath.lastIndexOf('/');
-    const saveDir = filePath.substring(0, lastSlash);
-    const fileName = filePath.substring(lastSlash + 1);
-
-    const config: DownloadConfig = {
-      url: url,
-      saveDir: saveDir,
-      fileName: fileName,
-      label: label,
-      metadata: metadata
-    };
-
+  private createTaskInstance(config: DownloadConfig): DownloadTask {
     return new DownloadTask(config, {}, this.filesDir);
   }
 
