@@ -616,6 +616,10 @@ export class DownloadTask {
       state: this.state,
       label: this.config.label ?? '',
       metadata: this.config.metadata ?? {},
+      headers: this.config.headers,
+      networkType: this.config.networkType,
+      maxRetries: this.config.maxRetries,
+      retryDelay: this.config.retryDelay,
       createTime: Date.now(),
       updateTime: Date.now()
     });

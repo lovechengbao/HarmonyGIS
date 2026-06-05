@@ -92,6 +92,14 @@ export interface DownloadTaskInfo {
   label: string;
   /** 用户自定义元数据 */
   metadata: Record<string, string>;
+  /** 自定义 HTTP 请求头（持久化存储，恢复时保留） */
+  headers?: Record<string, string>;
+  /** 网络限制：0 = 任意, 1 = 仅 WiFi */
+  networkType?: DownloadNetworkType;
+  /** 最大重试次数 */
+  maxRetries?: number;
+  /** 重试间隔毫秒 */
+  retryDelay?: number;
   /** 创建时间戳 */
   createTime: number;
   /** 更新时间戳 */

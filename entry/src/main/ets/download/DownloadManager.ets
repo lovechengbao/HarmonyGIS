@@ -209,6 +209,10 @@ export class DownloadManager {
         state: DownloadState.PAUSED,
         label: config.label ?? '',
         metadata: config.metadata ?? {},
+        headers: config.headers,
+        networkType: config.networkType,
+        maxRetries: config.maxRetries,
+        retryDelay: config.retryDelay,
         createTime: Date.now(),
         updateTime: Date.now()
       });
@@ -233,6 +237,10 @@ export class DownloadManager {
       state: DownloadState.DOWNLOADING,
       label: config.label ?? '',
       metadata: config.metadata ?? {},
+      headers: config.headers,
+      networkType: config.networkType,
+      maxRetries: config.maxRetries,
+      retryDelay: config.retryDelay,
       createTime: Date.now(),
       updateTime: Date.now()
     });
@@ -622,7 +630,11 @@ export class DownloadManager {
       saveDir: saveDir,
       fileName: fileName,
       label: info.label,
-      metadata: info.metadata
+      metadata: info.metadata,
+      headers: info.headers,
+      networkType: info.networkType,
+      maxRetries: info.maxRetries,
+      retryDelay: info.retryDelay
     };
   }
 }
