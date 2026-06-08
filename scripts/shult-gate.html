@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>舒尔特自动</title>
+<style>
+  body { margin:0; background:#1a1a2e; }
+  iframe { width:100vw; height:100vh; border:0; }
+  #btn { position:fixed; bottom:20px; right:20px; z-index:99999;
+    width:56px; height:56px; border-radius:50%;
+    background:#ff5722; color:#fff; font-size:14px; font-weight:bold;
+    border:none; box-shadow:0 4px 14px rgba(255,87,34,.5); cursor:pointer; }
+</style>
+</head>
+<body>
+<button id="btn" onclick="go()">Go</button>
+<iframe id="f" src="https://toolonline.net/shult-grid"></iframe>
+
+<script>
+var btn = document.getElementById('btn');
+var running = false;
+
+function go() {
+  if (running) return;
+  running = true;
+  var w = document.getElementById('f').contentWindow;
+  var d = w.document;
+
+  // 点开始游戏
+  var allBtns = d.querySelectorAll('button, .el-button');
+  for (var i = 0; i < allBtns.length; i++) {
+    if (allBtns[i].textContent.trim().indexOf('开始') >= 0) {
+      click(allBtns[i]);
+      break;
+    }
+  }
+
+  // 等格子
+  var tries = 0;
+  var timer = setInterval(function() {
+    var items = d.querySelectorAll('.game-play .item');
+    if (items.length >= 9) {
+      clearInterval(timer);
+      run(items);
+    }
+    if (++tries > 80) {
+      clearInterval(timer);
+      alert('超时');
+      running = false;
+    }
+  }, 300);
+}
+
+function run(items) {
+  var cells = [];
+  for (var i = 0; i < items.length; i++) {
+    var n = parseInt(items[i].textContent.trim(), 10);
+    if (n >= 1) cells.push({ n: n, e: items[i] });
+  }
+  cells.sort(function(a,b){return a.n-b.n});
+
+  var idx = 0;
+  function next() {
+    if (idx >= cells.length) { btn.textContent='OK'; running=false; return; }
+    btn.textContent = (idx+1)+'/'+cells.length;
+    cells[idx].e.style.background = '#ffeb3b';
+    click(cells[idx].e);
+    idx++;
+    setTimeout(next, 120);
+  }
+  setTimeout(next, 2000);
+}
+
+function click(el) {
+  ['pointerdown','pointerup','mousedown','mouseup','click','touchstart','touchend'].forEach(function(t){
+    try {
+      el.dispatchEvent(new MouseEvent(t, {bubbles:true,cancelable:true}));
+    }catch(e){}
+  });
+}
+</script>
+</body>
+</html>

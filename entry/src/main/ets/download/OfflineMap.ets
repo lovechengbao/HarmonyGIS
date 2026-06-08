@@ -7,13 +7,13 @@
  * - pauseDownloadingMap: 暂停下载
  *
  * 调用模式：
- *   OfflineMap.init(downloadManager, filesDir + '/offlineMaps');
+ *   await OfflineMap.init(filesDir, filesDir + '/offlineMaps');
  *   const result = await OfflineMap.downloadMap(url, mapId, 'offlineMap', true);
  *
  * 后续扩展：解压离线包、SQLite 元信息存储
  */
 
-import { DownloadManager } from './DownloadManager';
+import { DownloadManager, DownloadManagerOptions } from './DownloadManager';
 import { DownloadCallbacks, DownloadConfig, DownloadState } from './DownloadTypes';
 
 /** 下载结果状态码：下载完成 */
@@ -36,12 +36,17 @@ export class OfflineMap {
   /**
    * 初始化（必须在调用其他方法前执行）
    *
-   * @param mgr 已初始化的 DownloadManager 实例
-   * @param saveDir 离线地图保存目录（绝对路径）
+   * 内部自动创建并初始化 DownloadManager，调用方无需感知底层下载引擎。
+   *
+   * @param filesDir 应用沙箱 filesDir（用于持久化下载记录）
+   * @param saveDir 离线地图保存目录（绝对路径），建议用 filesDir + '/offlineMaps'
+   * @param options DownloadManager 可选配置（最大并发数等）
    */
-  static init(mgr: DownloadManager, saveDir: string): void {
-    OfflineMap.mgr = mgr;
+  static async init(filesDir: string, saveDir: string, options?: DownloadManagerOptions): Promise<void> {
+    OfflineMap.mgr = new DownloadManager(filesDir, options);
+    await OfflineMap.mgr.initialize();
     OfflineMap.saveDir = saveDir;
+    console.info('[OfflineMap] 初始化完成');
   }
 
   /**
