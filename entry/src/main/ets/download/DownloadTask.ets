@@ -413,6 +413,13 @@ export class DownloadTask {
    */
   private async openFile(append: boolean): Promise<void> {
     try {
+      // 确保父目录存在（fileIo.open 的 CREATE 只建文件不建父目录）
+      const parentDir = this.filePath.substring(0, this.filePath.lastIndexOf('/'));
+      if (parentDir && !fileIo.accessSync(parentDir)) {
+        fileIo.mkdirSync(parentDir, true);
+        console.info('[DownloadTask] 创建父目录: ' + parentDir);
+      }
+
       if (append) {
         // 断点续传：以追加模式打开，不截断已有数据
         this.file = await fileIo.open(

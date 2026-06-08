@@ -15,6 +15,7 @@
 
 import { DownloadManager, DownloadManagerOptions } from './DownloadManager';
 import { DownloadCallbacks, DownloadConfig, DownloadState } from './DownloadTypes';
+import fileIo from '@ohos.file.fs';
 
 /** 下载结果状态码：下载完成 */
 const RESULT_COMPLETED = 0;
@@ -43,6 +44,11 @@ export class OfflineMap {
    * @param options DownloadManager 可选配置（最大并发数等）
    */
   static async init(filesDir: string, saveDir: string, options?: DownloadManagerOptions): Promise<void> {
+    // 确保下载目录存在（fileIo.open 的 CREATE 只建文件不建父目录）
+    if (!fileIo.accessSync(saveDir)) {
+      fileIo.mkdirSync(saveDir, true);
+      console.info('[OfflineMap] 创建下载目录: ' + saveDir);
+    }
     OfflineMap.mgr = new DownloadManager(filesDir, options);
     await OfflineMap.mgr.initialize();
     OfflineMap.saveDir = saveDir;
