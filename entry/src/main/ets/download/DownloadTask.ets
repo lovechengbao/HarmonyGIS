@@ -389,8 +389,19 @@ export class DownloadTask {
         header: headers,
         connectTimeout: 30000,
         readTimeout: 60000,
-      }).then((_responseCode: number) => {
-        // 流式响应：dataEnd 中处理完成逻辑
+      }).then((responseCode: number) => {
+        // 检查 HTTP 状态码：成功下载必须是 200 或 206
+        if (responseCode !== 200 && responseCode !== 206) {
+          const msg = `HTTP ${responseCode}: 服务器返回错误状态码`;
+          console.error(`[DownloadTask] ${msg}, url=${this.config.url}`);
+          this.stopped = true; // 阻止 dataReceive/dataEnd 继续写入和处理
+          this.closeFile().then(() => {
+            reject(new Error(msg));
+          });
+          return;
+        }
+        // 200/206: dataEnd 中处理完成逻辑
+        console.info(`[DownloadTask] HTTP ${responseCode}, 开始接收流式数据, url=${this.config.url}`);
       }).catch(async (err: Error) => {
         if (this.destroyed || this.stopped) {
           return;
