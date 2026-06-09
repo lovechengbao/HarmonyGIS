@@ -52,6 +52,17 @@ export class OfflineMap {
     OfflineMap.mgr = new DownloadManager(filesDir, options);
     await OfflineMap.mgr.initialize();
     OfflineMap.saveDir = saveDir;
+
+    // 从持久化恢复 mapId → taskId 映射（避免重启后 mapTasks 丢失，getProgress/pauseDownloadingMap 找不到任务）
+    const taskList = await OfflineMap.mgr.getTaskList();
+    for (const info of taskList) {
+      const mapId = info.metadata?.mapId;
+      if (mapId) {
+        OfflineMap.mapTasks.set(mapId, info.taskId);
+        console.info(`[OfflineMap] 恢复 mapTasks 映射: mapId=${mapId} → taskId=${info.taskId}`);
+      }
+    }
+
     console.info('[OfflineMap] 初始化完成');
   }
 
