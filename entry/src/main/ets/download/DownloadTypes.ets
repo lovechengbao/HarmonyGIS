@@ -42,6 +42,8 @@ export interface DownloadConfig {
   label?: string;
   /** 关联的元数据（如地图区域 ID、缩放级别等） */
   metadata?: Record<string, string>;
+  /** 预指定 taskId（提供后跳过内部生成，允许调用方提前拿到 taskId） */
+  taskId?: string;
 }
 
 /**

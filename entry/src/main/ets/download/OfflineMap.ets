@@ -132,7 +132,12 @@ export class OfflineMap {
     }
 
     // 新建下载任务
-    console.info(`[OfflineMap] 创建新下载任务: mapId=${mapId}, url=${url}`);
+    // 关键：先生成 taskId 并立即写入 mapTasks，再调异步的 createTask
+    // 否则 getProgress/pauseDownloadingMap 在 createTask resolve 前查不到映射
+    const newTaskId = `dl_${Date.now()}_${Date.now() % 10000}`;
+    OfflineMap.mapTasks.set(mapId, newTaskId);
+    console.info(`[OfflineMap] 创建新下载任务: mapId=${mapId}, taskId=${newTaskId}, url=${url}`);
+
     const promise = new Promise<number>((resolve: (result: number) => void) => {
       OfflineMap.resolvers.set(mapId, resolve);
 
@@ -141,14 +146,19 @@ export class OfflineMap {
         saveDir: OfflineMap.saveDir,
         fileName: mapId + '.zip',
         label: tag,
-        metadata: { mapId: mapId }
+        metadata: { mapId: mapId },
+        taskId: newTaskId  // 预指定，避免 createTask 内部重新生成
       };
 
-      OfflineMap.mgr.createTask(config, OfflineMap.buildCallbacks(mapId)).then((taskId: string) => {
-        OfflineMap.mapTasks.set(mapId, taskId);
-        console.info(`[OfflineMap] 下载任务已创建: taskId=${taskId}, mapId=${mapId}`);
+      OfflineMap.mgr.createTask(config, OfflineMap.buildCallbacks(mapId)).then((actualTaskId: string) => {
+        // 兜底：如果 createTask 返回了不同的 taskId（比如命中已有任务），更新映射
+        if (actualTaskId !== newTaskId) {
+          OfflineMap.mapTasks.set(mapId, actualTaskId);
+          console.info(`[OfflineMap] taskId 已更新: mapId=${mapId}, ${newTaskId} → ${actualTaskId}`);
+        }
       }).catch((err: Error) => {
         console.error(`[OfflineMap] 创建任务失败: mapId=${mapId}, error=${err.message}`);
+        OfflineMap.mapTasks.delete(mapId);  // 清理预写入的映射
         const r = OfflineMap.resolvers.get(mapId);
         if (r) {
           r(RESULT_ERROR);

@@ -186,8 +186,12 @@ export class DownloadManager {
     // 检查并发限制
     const activeCount = this.countDownloadingTasks();
 
-    // 生成 taskId（同步，不阻塞）
-    task.initTaskId();
+    // 生成 taskId：优先用 config 预指定的，否则内部生成
+    if (config.taskId) {
+      task.recover(config.taskId, 0, -1);
+    } else {
+      task.initTaskId();
+    }
     const tid = task.getTaskId();
 
     const realCallbacks = this.buildTaskCallbacks(tid, callbacks);
