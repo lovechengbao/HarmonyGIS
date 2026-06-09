@@ -53,9 +53,14 @@ export class OfflineMap {
     await OfflineMap.mgr.initialize();
     OfflineMap.saveDir = saveDir;
 
-    // 从持久化恢复 mapId → taskId 映射（避免重启后 mapTasks 丢失，getProgress/pauseDownloadingMap 找不到任务）
+    // 从持久化恢复 mapId → taskId 映射（只恢复非终态任务）
     const taskList = await OfflineMap.mgr.getTaskList();
     for (const info of taskList) {
+      // 跳过终态（已完成/已取消），这些任务不在 activeTasks 中，恢复无意义
+      if (info.state === DownloadState.COMPLETED ||
+          info.state === DownloadState.CANCELLED) {
+        continue;
+      }
       const mapId = info.metadata?.mapId;
       if (mapId) {
         OfflineMap.mapTasks.set(mapId, info.taskId);
@@ -170,6 +175,8 @@ export class OfflineMap {
     }
     const progress = OfflineMap.mgr.getTaskProgress(taskId);
     if (!progress) {
+      // 僵尸条目：task 已不在 activeTasks（已取消/已完成），清理 mapTasks
+      OfflineMap.mapTasks.delete(mapId);
       return -1;
     }
     return progress.progress;
@@ -189,6 +196,12 @@ export class OfflineMap {
       console.warn(`[OfflineMap] 暂停失败，mapId 不存在: ${mapId}`);
       return;
     }
+    // 如果 task 已不在 activeTasks（僵尸条目），清理后返回
+    if (!OfflineMap.mgr.getTask(taskId)) {
+      console.warn(`[OfflineMap] task 已不存在（可能已完成/取消），清理 mapTasks: mapId=${mapId}`);
+      OfflineMap.mapTasks.delete(mapId);
+      return;
+    }
     console.info(`[OfflineMap] 暂停下载: mapId=${mapId}, taskId=${taskId}`);
     await OfflineMap.mgr.pauseTask(taskId);
   }
@@ -205,30 +218,35 @@ export class OfflineMap {
     return {
       onCompleted: (_taskId: string, _filePath: string) => {
         console.info(`[OfflineMap] 下载完成: mapId=${mapId}`);
+        // 完成即终态，清理全部映射（释放内存 + 允许下次 downloadMap 重新创建）
         const r = OfflineMap.resolvers.get(mapId);
         if (r) {
           r(RESULT_COMPLETED);
-          OfflineMap.resolvers.delete(mapId);
-          OfflineMap.pendingPromises.delete(mapId);
         }
+        OfflineMap.resolvers.delete(mapId);
+        OfflineMap.pendingPromises.delete(mapId);
+        OfflineMap.mapTasks.delete(mapId);
       },
       onFailed: (_taskId: string, error: string) => {
         console.error(`[OfflineMap] 下载失败: mapId=${mapId}, error=${error}`);
+        // 失败即终态，清理全部映射
         const r = OfflineMap.resolvers.get(mapId);
         if (r) {
           r(RESULT_ERROR);
-          OfflineMap.resolvers.delete(mapId);
-          OfflineMap.pendingPromises.delete(mapId);
         }
+        OfflineMap.resolvers.delete(mapId);
+        OfflineMap.pendingPromises.delete(mapId);
+        OfflineMap.mapTasks.delete(mapId);
       },
       onPaused: (_taskId: string) => {
         console.info(`[OfflineMap] 下载已暂停: mapId=${mapId}`);
+        // 暂停非终态，保留 mapTasks（可 resume），仅清理 Promise 关联
         const r = OfflineMap.resolvers.get(mapId);
         if (r) {
           r(RESULT_PAUSED);
-          OfflineMap.resolvers.delete(mapId);
-          OfflineMap.pendingPromises.delete(mapId);
         }
+        OfflineMap.resolvers.delete(mapId);
+        OfflineMap.pendingPromises.delete(mapId);
       }
     };
   }
