@@ -344,7 +344,8 @@ export class DownloadTask {
       // ── dataReceive: 异步顺序写入文件，不阻塞主线程 ──
       let receiveCount = 0;
       this.httpRequest.on('dataReceive', (data: ArrayBuffer) => {
-        if (this.destroyed || this.stopped || !this.file) {
+        // 四重检查：httpRequest 为 null 说明已 destroy（off 可能异步无效）
+        if (!this.httpRequest || this.destroyed || this.stopped || !this.file) {
           return;
         }
         receiveCount++;
@@ -528,6 +529,11 @@ export class DownloadTask {
    * 更新进度回调（定期持久化）
    */
   private async updateProgressCallback(): Promise<void> {
+    // 非下载中状态不触发进度回调（防止 pause/cancel 后仍有回调到达 JS）
+    if (this.state !== DownloadState.DOWNLOADING) {
+      return;
+    }
+
     const now = Date.now();
 
     // 每 5 秒持久化一次进度
@@ -537,6 +543,10 @@ export class DownloadTask {
       await updateTaskState(this.filesDir, this.tid, DownloadState.DOWNLOADING,
         this.downloadedBytes, this.totalBytes);
       this.lastPersistTime = now;
+      // await 后可能已被暂停，重新检查防止发送过期回调
+      if (this.state !== DownloadState.DOWNLOADING) {
+        return;
+      }
     }
 
     // 触发进度回调
