@@ -179,20 +179,29 @@ export class DownloadTask {
 
   /**
    * 暂停下载 — 关闭 HTTP 连接和文件描述符
+   *
+   * 关键：不等待 writeQueue 排空。先设 stopped=true 让 dataReceive
+   * 拒绝新数据，然后丢弃写队列中 pending 的写入（它们会检查 stopped
+   * 标记后跳过），直接关闭文件。这样暂停能立即响应，不再等队列排空。
    */
   async pause(): Promise<void> {
     console.info(`[DownloadTask] pause() 被调用, 当前状态: ${this.state}, taskId: ${this.tid}`);
 
-    // 标记停止，禁止重试
+    // 1. 标记停止，禁止重试 + dataReceive 拒绝新数据
     this.stopped = true;
     this.clearRetryTimer();
-    // 直接暴力暂停：不管状态如何，都断连接关文件
+    // 2. 先改状态（断连接前，防止竞态）
     this.setState(DownloadState.PAUSED);
+    // 3. 销毁 HTTP 连接
     this.destroyHttpRequest();
-    await this.closeFile();
-    await updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
-      this.totalBytes);
+    // 4. 不等待写队列 — 直接关闭文件（队列中的 pending 写入检测到 stopped 后会跳过）
+    this.closeFileNow();
+    // 5. 立即通知回调（让 JS 尽快收到 -50），持久化放到后台异步执行
     this.callbacks.onPaused?.(this.tid);
+    updateTaskState(this.filesDir, this.tid, DownloadState.PAUSED, this.downloadedBytes,
+      this.totalBytes).catch((e: Error) => {
+      console.error(`[DownloadTask] 持久化暂停状态失败: ${e.message}`);
+    });
     console.info(`[DownloadTask] 已暂停完成, taskId: ${this.tid}, 已下载: ${this.downloadedBytes}`);
   }
 
@@ -237,7 +246,7 @@ export class DownloadTask {
     this.clearRetryTimer();
 
     this.destroyHttpRequest();
-    await this.closeFile();
+    this.closeFileNow(); // 不等待写队列，立即关闭文件
 
     this.setState(DownloadState.CANCELLED);
     await removeTaskInfo(this.filesDir, this.tid);
@@ -344,9 +353,12 @@ export class DownloadTask {
         }
         // 用写队列保证写入顺序（后一块必须等前一块写完）
         this.writeQueue = this.writeQueue.then(async () => {
+          // 暂停/取消后跳过写入和回调，避免关闭文件时等待队列排空
+          if (this.destroyed || this.stopped || !this.file) {
+            return;
+          }
           await fileIo.write(this.file!.fd, data);
           this.downloadedBytes += data.byteLength;
-          // 暂停后跳过回调，但数据照样写盘
           if (!this.stopped) {
             await this.updateProgressCallback();
           }
@@ -452,7 +464,9 @@ export class DownloadTask {
   }
 
   /**
-   * 安全关闭文件（等待写队列排空后关闭，不阻塞主线程）
+   * 安全关闭文件（等待写队列排空后关闭）
+   *
+   * 用于下载完成、失败重试等场景 — 需要确保所有已接收数据落盘。
    */
   private async closeFile(): Promise<void> {
     if (this.file) {
@@ -465,6 +479,27 @@ export class DownloadTask {
       }
       this.file = null;
       this.writeQueue = Promise.resolve();
+    }
+  }
+
+  /**
+   * 立即关闭文件（不等待写队列排空）
+   *
+   * 用于暂停/取消场景 — 用户操作需要即时响应。
+   * 前提：调用前已设 this.stopped = true，写队列中 pending 的
+   * 条目会检测到 stopped 标记后跳过实际 I/O，因此不会损坏数据。
+   */
+  private closeFileNow(): void {
+    if (this.file) {
+      // 重置写队列 — 已排队的条目继续异步执行但会因 stopped 而跳过
+      // 新加入队列的写入走这个新鲜 Promise 链
+      this.writeQueue = Promise.resolve();
+      try {
+        fileIo.closeSync(this.file);
+      } catch (err) {
+        console.warn(`[DownloadTask] 关闭文件异常: ${JSON.stringify(err)}`);
+      }
+      this.file = null;
     }
   }
 
