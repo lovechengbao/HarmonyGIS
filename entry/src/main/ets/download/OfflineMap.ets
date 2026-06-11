@@ -15,6 +15,7 @@
 
 import { DownloadManager, DownloadManagerOptions } from './DownloadManager';
 import { DownloadCallbacks, DownloadConfig, DownloadState } from './DownloadTypes';
+import { ZipExtractor } from './ZipExtractor';
 import fileIo from '@ohos.file.fs';
 
 /** 下载结果状态码：下载完成 */
@@ -27,6 +28,8 @@ const RESULT_ERROR = -1;
 export class OfflineMap {
   private static mgr: DownloadManager;
   private static saveDir: string;
+  /** 解压目标根目录（如 databaseDir + '/offlineMap'） */
+  private static extractRoot: string = '';
   /** mapId → taskId 映射 */
   private static mapTasks: Map<string, string> = new Map();
   /** mapId → resolve 函数（唤醒等待中的 downloadMap Promise） */
@@ -41,9 +44,11 @@ export class OfflineMap {
    *
    * @param filesDir 应用沙箱 filesDir（用于持久化下载记录）
    * @param saveDir 离线地图保存目录（绝对路径），建议用 filesDir + '/offlineMaps'
+   * @param extractRoot 解压目标根目录（如 databaseDir + '/offlineMap'），zip 下载完成后解压至此
    * @param options DownloadManager 可选配置（最大并发数等）
    */
-  static async init(filesDir: string, saveDir: string, options?: DownloadManagerOptions): Promise<void> {
+  static async init(filesDir: string, saveDir: string, extractRoot?: string,
+    options?: DownloadManagerOptions): Promise<void> {
     // 确保下载目录存在（fileIo.open 的 CREATE 只建文件不建父目录）
     if (!fileIo.accessSync(saveDir)) {
       fileIo.mkdirSync(saveDir, true);
@@ -52,6 +57,7 @@ export class OfflineMap {
     OfflineMap.mgr = new DownloadManager(filesDir, options);
     await OfflineMap.mgr.initialize();
     OfflineMap.saveDir = saveDir;
+    OfflineMap.extractRoot = extractRoot ?? '';
 
     // 从持久化恢复 mapId → taskId 映射（只恢复非终态任务）
     const taskList = await OfflineMap.mgr.getTaskList();
@@ -226,8 +232,30 @@ export class OfflineMap {
    */
   private static buildCallbacks(mapId: string): DownloadCallbacks {
     return {
-      onCompleted: (_taskId: string, _filePath: string) => {
-        console.info(`[OfflineMap] 下载完成: mapId=${mapId}`);
+      onCompleted: async (_taskId: string, _filePath: string) => {
+        console.info(`[OfflineMap] 下载完成: mapId=${mapId}, path=${_filePath}`);
+
+        // 如果配置了 extractRoot 且是 zip 文件，解压到 extractRoot/mapId/
+        if (OfflineMap.extractRoot && _filePath.endsWith('.zip')) {
+          const extractDir = OfflineMap.extractRoot + '/' + mapId;
+          try {
+            console.info(`[OfflineMap] 开始解压: ${_filePath} → ${extractDir}`);
+            await ZipExtractor.extract(_filePath, extractDir);
+            console.info(`[OfflineMap] 解压完成: mapId=${mapId}`);
+          } catch (err) {
+            const e = err as Error;
+            console.error(`[OfflineMap] 解压失败: mapId=${mapId}, error=${e.message}`);
+            // 解压失败 → 返回错误，不清理 mapTasks（允许重试）
+            const r = OfflineMap.resolvers.get(mapId);
+            if (r) {
+              r(RESULT_ERROR);
+            }
+            OfflineMap.resolvers.delete(mapId);
+            OfflineMap.pendingPromises.delete(mapId);
+            return;
+          }
+        }
+
         // 完成即终态，清理全部映射（释放内存 + 允许下次 downloadMap 重新创建）
         const r = OfflineMap.resolvers.get(mapId);
         if (r) {

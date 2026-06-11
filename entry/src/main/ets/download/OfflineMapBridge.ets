@@ -9,7 +9,7 @@
  * 使用示例：
  *   await OfflineMapBridge.init(filesDir, filesDir + '/offlineMaps', (id, result) => {
  *     webview.runJavaScript(`CgsNativeBridge.onCallback('${id}', ${result})`);
- *   });
+ *   }, context.databaseDir + '/offlineMap');
  */
 
 import { OfflineMap } from './OfflineMap';
@@ -33,10 +33,12 @@ export class OfflineMapBridge {
    * @param filesDir 应用沙箱 filesDir（用于持久化下载记录）
    * @param saveDir 离线地图保存目录（绝对路径）
    * @param callback 宿主注入的回调函数（内部调用 WebView.runJavaScript）
+   * @param extractRoot 解压目标根目录（如 databaseDir + '/offlineMap'），可选
    * @param options DownloadManager 可选配置（最大并发数等）
    */
-  static async init(filesDir: string, saveDir: string, callback: JsCallback, options?: DownloadManagerOptions): Promise<void> {
-    await OfflineMap.init(filesDir, saveDir, options);
+  static async init(filesDir: string, saveDir: string, callback: JsCallback,
+    extractRoot?: string, options?: DownloadManagerOptions): Promise<void> {
+    await OfflineMap.init(filesDir, saveDir, extractRoot, options);
     OfflineMapBridge.callback = callback;
     console.info('[OfflineMapBridge] 初始化完成');
   }

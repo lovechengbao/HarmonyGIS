@@ -75,3 +75,6 @@ export {
 export { OfflineMap } from './OfflineMap';
 
 export { OfflineMapBridge } from './OfflineMapBridge';
+
+export { ZipExtractor } from './ZipExtractor';
+export type { ExtractProgressCallback } from './ZipExtractor';
