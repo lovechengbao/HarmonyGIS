@@ -66,6 +66,8 @@ export class DownloadTask {
   private destroyed: boolean = false;
   /** 是否已主动暂停（禁止重试） */
   private stopped: boolean = false;
+  /** 服务器返回的文件名（从 Content-Disposition 响应头解析） */
+  private serverFileName: string = '';
 
   constructor(config: DownloadConfig, callbacks: DownloadCallbacks, filesDir: string) {
     this.config = config;
@@ -113,6 +115,13 @@ export class DownloadTask {
    */
   getFilePath(): string {
     return this.filePath;
+  }
+
+  /**
+   * 获取服务器返回的文件名（Content-Disposition 解析结果）
+   */
+  getServerFileName(): string {
+    return this.serverFileName;
   }
 
   /**
@@ -381,6 +390,40 @@ export class DownloadTask {
             begins + progress.totalSize :
             progress.totalSize;
           console.info(`[DownloadTask] totalBytes 已设置: ${this.totalBytes}, taskId: ${this.tid}`);
+        }
+      });
+
+      // ── headerReceive: 捕获 Content-Disposition 获取服务器文件名 ──
+      this.httpRequest.on('headerReceive', (header: Record<string, string>) => {
+        console.info(`[DownloadTask] headerReceive: ${JSON.stringify(header)}, taskId: ${this.tid}`);
+        const keys = Object.keys(header);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i];
+          if (key.toLowerCase() === 'content-disposition') {
+            const value = header[key];
+            // 解析: attachment; filename=xxx 或 filename=xxx
+            // 不依赖正则，纯字符串操作
+            const fnIdx = value.toLowerCase().indexOf('filename=');
+            if (fnIdx >= 0) {
+              let name = value.substring(fnIdx + 9).trim(); // 跳过 'filename='
+              // 去除首尾引号
+              if ((name.startsWith('"') && name.indexOf('"', 1) > 0)) {
+                name = name.substring(1, name.indexOf('"', 1));
+              } else if ((name.startsWith("'") && name.indexOf("'", 1) > 0)) {
+                name = name.substring(1, name.indexOf("'", 1));
+              }
+              // 去除尾部参数（分号后的内容）
+              const semiIdx = name.indexOf(';');
+              if (semiIdx >= 0) {
+                name = name.substring(0, semiIdx).trim();
+              }
+              if (name.length > 0) {
+                this.serverFileName = name;
+                console.info(`[DownloadTask] 服务器文件名: ${this.serverFileName}`);
+              }
+            }
+            break;
+          }
         }
       });
 

@@ -235,10 +235,17 @@ export class OfflineMap {
       onCompleted: async (_taskId: string, _filePath: string) => {
         console.info(`[OfflineMap] 下载完成: mapId=${mapId}, path=${_filePath}`);
 
-        // 下载文件一定是 zip，解压到 extractRoot/<文件名去掉.zip>/
+        // 下载文件一定是 zip，解压到 extractRoot/<服务器文件名去掉.zip>/
         if (OfflineMap.extractRoot) {
-          const fileName = _filePath.substring(_filePath.lastIndexOf('/') + 1);
-          const folderName = fileName.replace('.zip', '');
+          // 优先用 Content-Disposition 文件名，没有则从 _filePath 取
+          const serverName = OfflineMap.mgr.getServerFileName(_taskId);
+          let folderName: string;
+          if (serverName) {
+            folderName = serverName.replace('.zip', '');
+          } else {
+            const fileName = _filePath.substring(_filePath.lastIndexOf('/') + 1);
+            folderName = fileName.replace('.zip', '');
+          }
           const extractDir = OfflineMap.extractRoot + '/' + folderName;
           try {
             console.info(`[OfflineMap] 开始解压: ${_filePath} → ${extractDir}`);

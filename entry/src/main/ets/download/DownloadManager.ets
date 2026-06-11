@@ -405,6 +405,14 @@ export class DownloadManager {
   }
 
   /**
+   * 获取服务器返回的文件名（Content-Disposition）
+   */
+  getServerFileName(taskId: string): string {
+    const task = this.activeTasks.get(taskId);
+    return task ? task.getServerFileName() : '';
+  }
+
+  /**
    * 获取所有任务的进度
    */
   getAllProgress(): DownloadProgress[] {
