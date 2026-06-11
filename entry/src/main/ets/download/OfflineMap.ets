@@ -235,16 +235,18 @@ export class OfflineMap {
       onCompleted: async (_taskId: string, _filePath: string) => {
         console.info(`[OfflineMap] 下载完成: mapId=${mapId}, path=${_filePath}`);
 
-        // 如果配置了 extractRoot 且是 zip 文件，解压到 extractRoot/mapId/
-        if (OfflineMap.extractRoot && _filePath.endsWith('.zip')) {
-          const extractDir = OfflineMap.extractRoot + '/' + mapId;
+        // 下载文件一定是 zip，解压到 extractRoot/<文件名去掉.zip>/
+        if (OfflineMap.extractRoot) {
+          const fileName = _filePath.substring(_filePath.lastIndexOf('/') + 1);
+          const folderName = fileName.replace('.zip', '');
+          const extractDir = OfflineMap.extractRoot + '/' + folderName;
           try {
             console.info(`[OfflineMap] 开始解压: ${_filePath} → ${extractDir}`);
             await ZipExtractor.extract(_filePath, extractDir);
-            console.info(`[OfflineMap] 解压完成: mapId=${mapId}`);
+            console.info(`[OfflineMap] 解压完成: ${folderName}`);
           } catch (err) {
             const e = err as Error;
-            console.error(`[OfflineMap] 解压失败: mapId=${mapId}, error=${e.message}`);
+            console.error(`[OfflineMap] 解压失败: ${folderName}, error=${e.message}`);
             // 解压失败 → 返回错误，不清理 mapTasks（允许重试）
             const r = OfflineMap.resolvers.get(mapId);
             if (r) {
