@@ -14,9 +14,12 @@
  */
 
 import { DownloadManager, DownloadManagerOptions } from './DownloadManager';
-import { DownloadCallbacks, DownloadConfig, DownloadState } from './DownloadTypes';
+import { DownloadCallbacks, DownloadConfig, DownloadProgress, DownloadState } from './DownloadTypes';
 import { ZipExtractor } from './ZipExtractor';
+import { XmlFetcher } from './XmlFetcher';
+import { MapMetadataStore } from './MapMetadataStore';
 import fileIo from '@ohos.file.fs';
+import common from '@ohos.app.ability.common';
 
 /** 下载结果状态码：下载完成 */
 const RESULT_COMPLETED = 0;
@@ -36,18 +39,21 @@ export class OfflineMap {
   private static resolvers: Map<string, (result: number) => void> = new Map();
   /** mapId → 正在等待的 Promise（防止并发重复调用 downloadMap） */
   private static pendingPromises: Map<string, Promise<number>> = new Map();
+  /** mapId → 上次上报的百分比（检测 1% 边界，避免重复写 SQLite） */
+  private static lastReportedPct: Map<string, number> = new Map();
 
   /**
    * 初始化（必须在调用其他方法前执行）
    *
    * 内部自动创建并初始化 DownloadManager，调用方无需感知底层下载引擎。
    *
+   * @param context 应用上下文（用于 SQLite 数据库初始化）
    * @param filesDir 应用沙箱 filesDir（用于持久化下载记录）
    * @param saveDir 离线地图保存目录（绝对路径），建议用 filesDir + '/offlineMaps'
    * @param extractRoot 解压目标根目录（如 databaseDir + '/offlineMap'），zip 下载完成后解压至此
    * @param options DownloadManager 可选配置（最大并发数等）
    */
-  static async init(filesDir: string, saveDir: string, extractRoot?: string,
+  static async init(context: common.Context, filesDir: string, saveDir: string, extractRoot?: string,
     options?: DownloadManagerOptions): Promise<void> {
     // 确保下载目录存在（fileIo.open 的 CREATE 只建文件不建父目录）
     if (!fileIo.accessSync(saveDir)) {
@@ -58,6 +64,9 @@ export class OfflineMap {
     await OfflineMap.mgr.initialize();
     OfflineMap.saveDir = saveDir;
     OfflineMap.extractRoot = extractRoot ?? '';
+
+    // 初始化 SQLite 元数据存储（失败不影响下载主流程）
+    await MapMetadataStore.init(context);
 
     // 从持久化恢复 mapId → taskId 映射（只恢复非终态任务）
     const taskList = await OfflineMap.mgr.getTaskList();
@@ -81,23 +90,40 @@ export class OfflineMap {
    * 启动或恢复地图下载
    *
    * 行为：
-   * - 首次调用：创建新的下载任务，返回 Promise
+   * - 首次调用：先请求元数据 XML → 存入 SQLite → 创建新的下载任务，返回 Promise
    * - 下载中重复调用：返回同一个 Promise（不会重复创建）
    * - 暂停后再次调用：恢复下载（断点续传），返回新的 Promise
    * - 已完成：直接返回 0
    *
    * @param url 地图包下载地址
+   * @param metadataUrl 元数据 XML 地址（下载前请求）
    * @param mapId 地图唯一标识
    * @param tag 任务标签（用于日志/UI）
    * @param overwrite 是否覆盖已完成的下载（预留，暂未实现）
    * @returns Promise<number> — 0=完成, -50=已暂停, -1=错误
    */
-  static async downloadMap(url: string, mapId: string, tag: string, overwrite: boolean): Promise<number> {
+  static async downloadMap(url: string, metadataUrl: string, mapId: string, tag: string,
+    overwrite: boolean): Promise<number> {
     // 已有等待中的 Promise（下载中 / 恢复中重复调用）
     const existing = OfflineMap.pendingPromises.get(mapId);
     if (existing) {
       console.info(`[OfflineMap] mapId ${mapId} 已有等待中的下载，返回已有 Promise`);
       return existing;
+    }
+
+    // ── 请求元数据 XML → 存入 SQLite（失败不阻塞下载）──
+    try {
+      const metadataObj = await XmlFetcher.fetchMetadata(metadataUrl);
+      const metadataJson = JSON.stringify(metadataObj);
+      await MapMetadataStore.insertOrUpdateMap(mapId, metadataJson, metadataUrl, url);
+      console.info(`[OfflineMap] 元数据已存入 SQLite: mapId=${mapId}`);
+    } catch (err) {
+      const e = err as Error;
+      console.warn(`[OfflineMap] 元数据请求失败，继续下载: mapId=${mapId}, error=${e.message}`);
+      // 尝试存入空元数据（标记下载已开始）
+      MapMetadataStore.insertOrUpdateMap(mapId, '{}', metadataUrl, url).catch((_e: Error) => {
+        // 静默忽略
+      });
     }
 
     const existingTaskId = OfflineMap.mapTasks.get(mapId);
@@ -228,12 +254,33 @@ export class OfflineMap {
 
   /**
    * 构建 DownloadManager 回调
-   * 将任务事件（完成/失败/暂停）转为 mapId 维度的 Promise resolve
+   * 将任务事件（完成/失败/暂停）转为 mapId 维度的 Promise resolve，
+   * 并在进度/状态变更时同步写入 SQLite。
    */
   private static buildCallbacks(mapId: string): DownloadCallbacks {
     return {
+      onProgress: (progress: DownloadProgress) => {
+        // ── 1% 边界检测：将 SQLite 更新频率从"每 chunk"压到"每 1%" ──
+        const lastPct = OfflineMap.lastReportedPct.get(mapId) ?? -1;
+        if (progress.progress > lastPct) {
+          OfflineMap.lastReportedPct.set(mapId, progress.progress);
+          // fire-and-forget — 不阻塞写队列
+          MapMetadataStore.updateProgress(
+            mapId,
+            progress.progress,
+            progress.downloadedBytes,
+            progress.totalBytes,
+            progress.state as number
+          ).catch((_e: Error) => {
+            // 静默忽略
+          });
+        }
+      },
       onCompleted: async (_taskId: string, _filePath: string) => {
         console.info(`[OfflineMap] 下载完成: mapId=${mapId}, path=${_filePath}`);
+
+        // 确定最终文件路径（如果解压则是解压目录，否则是下载文件路径）
+        let finalPath = _filePath;
 
         // 下载文件一定是 zip，解压到 extractRoot/<服务器文件名去掉.zip>/
         if (OfflineMap.extractRoot) {
@@ -251,10 +298,13 @@ export class OfflineMap {
             console.info(`[OfflineMap] 开始解压: ${_filePath} → ${extractDir}`);
             await ZipExtractor.extract(_filePath, extractDir);
             console.info(`[OfflineMap] 解压完成: ${folderName}`);
+            finalPath = extractDir;
           } catch (err) {
             const e = err as Error;
             console.error(`[OfflineMap] 解压失败: ${folderName}, error=${e.message}`);
             // 解压失败 → 返回错误，不清理 mapTasks（允许重试）
+            // 更新 SQLite 为失败状态
+            MapMetadataStore.updateProgress(mapId, 0, 0, -1, 4).catch((_e: Error) => {});
             const r = OfflineMap.resolvers.get(mapId);
             if (r) {
               r(RESULT_ERROR);
@@ -264,6 +314,19 @@ export class OfflineMap {
             return;
           }
         }
+
+        // ── 更新 SQLite 完成状态（成功 + 已解压）──
+        const progress = OfflineMap.mgr.getTaskProgress(_taskId);
+        const finalSize = progress ? progress.totalBytes : -1;
+        const finalDownloaded = progress ? progress.downloadedBytes : -1;
+        MapMetadataStore.updateCompletion(
+          mapId, finalPath, finalSize, finalDownloaded, 3
+        ).catch((_e: Error) => {
+          console.warn(`[OfflineMap] SQLite 完成状态更新失败`);
+        });
+
+        // 清理 % 跟踪
+        OfflineMap.lastReportedPct.delete(mapId);
 
         // 完成即终态，清理全部映射（释放内存 + 允许下次 downloadMap 重新创建）
         const r = OfflineMap.resolvers.get(mapId);
@@ -276,6 +339,16 @@ export class OfflineMap {
       },
       onFailed: (_taskId: string, error: string) => {
         console.error(`[OfflineMap] 下载失败: mapId=${mapId}, error=${error}`);
+
+        // ── 更新 SQLite 为失败状态 ──
+        const progress = OfflineMap.mgr.getTaskProgress(_taskId);
+        const dlSize = progress ? progress.downloadedBytes : 0;
+        const tSize = progress ? progress.totalBytes : -1;
+        MapMetadataStore.updateProgress(mapId, 0, dlSize, tSize, 4).catch((_e: Error) => {});
+
+        // 清理 % 跟踪
+        OfflineMap.lastReportedPct.delete(mapId);
+
         // 失败即终态，清理全部映射
         const r = OfflineMap.resolvers.get(mapId);
         if (r) {
@@ -287,6 +360,14 @@ export class OfflineMap {
       },
       onPaused: (_taskId: string) => {
         console.info(`[OfflineMap] 下载已暂停: mapId=${mapId}`);
+
+        // ── 更新 SQLite 为暂停状态 ──
+        const progress = OfflineMap.mgr.getTaskProgress(_taskId);
+        const dlSize = progress ? progress.downloadedBytes : 0;
+        const tSize = progress ? progress.totalBytes : -1;
+        MapMetadataStore.updateProgress(mapId, progress ? progress.progress : 0, dlSize, tSize,
+          2).catch((_e: Error) => {});
+
         // 暂停非终态，保留 mapTasks（可 resume），仅清理 Promise 关联
         const r = OfflineMap.resolvers.get(mapId);
         if (r) {

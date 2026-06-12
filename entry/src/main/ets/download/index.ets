@@ -78,3 +78,8 @@ export { OfflineMapBridge } from './OfflineMapBridge';
 
 export { ZipExtractor } from './ZipExtractor';
 export type { ExtractProgressCallback } from './ZipExtractor';
+
+export { XmlFetcher } from './XmlFetcher';
+
+export { MapMetadataStore } from './MapMetadataStore';
+export type { MapMetadataRecord } from './MapMetadataStore';

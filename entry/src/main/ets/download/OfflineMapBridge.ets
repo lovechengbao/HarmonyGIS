@@ -14,6 +14,7 @@
 
 import { OfflineMap } from './OfflineMap';
 import { DownloadManagerOptions } from './DownloadManager';
+import common from '@ohos.app.ability.common';
 
 /**
  * JS 回调函数类型
@@ -30,15 +31,16 @@ export class OfflineMapBridge {
    *
    * 内部自动初始化 OfflineMap（创建 DownloadManager 等），调用方无需感知底层细节。
    *
+   * @param context 应用上下文（用于 SQLite 初始化）
    * @param filesDir 应用沙箱 filesDir（用于持久化下载记录）
    * @param saveDir 离线地图保存目录（绝对路径）
    * @param callback 宿主注入的回调函数（内部调用 WebView.runJavaScript）
    * @param extractRoot 解压目标根目录（如 databaseDir + '/offlineMap'），可选
    * @param options DownloadManager 可选配置（最大并发数等）
    */
-  static async init(filesDir: string, saveDir: string, callback: JsCallback,
+  static async init(context: common.Context, filesDir: string, saveDir: string, callback: JsCallback,
     extractRoot?: string, options?: DownloadManagerOptions): Promise<void> {
-    await OfflineMap.init(filesDir, saveDir, extractRoot, options);
+    await OfflineMap.init(context, filesDir, saveDir, extractRoot, options);
     OfflineMapBridge.callback = callback;
     console.info('[OfflineMapBridge] 初始化完成');
   }
@@ -50,11 +52,13 @@ export class OfflineMapBridge {
    *
    * @param callbackId JS 回调标识
    * @param downloadurl 地图包下载地址
+   * @param metadataUrl 元数据 XML 请求地址（下载前请求）
    * @param mapId 地图唯一标识
    * @param append 0=覆盖下载, 1=追加/恢复（目前暂未区分，统一走断点续传逻辑）
    */
-  static async downloadMap(callbackId: string, downloadurl: string, mapId: string, append: number): Promise<void> {
-    const result: number = await OfflineMap.downloadMap(downloadurl, mapId, 'offlineMap', true);
+  static async downloadMap(callbackId: string, downloadurl: string, metadataUrl: string, mapId: string,
+    append: number): Promise<void> {
+    const result: number = await OfflineMap.downloadMap(downloadurl, metadataUrl, mapId, 'offlineMap', true);
     OfflineMapBridge.callback(callbackId, result);
   }
 
