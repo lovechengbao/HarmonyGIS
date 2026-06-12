@@ -375,8 +375,6 @@ export class DownloadManager {
    * 获取指定任务详情
    */
   getTask(taskId: string): DownloadTaskInfo | null {
-    const taskInfos = getAllTaskInfos(this.filesDir);
-    // getAllTaskInfos 返回 Promise<DownloadTaskInfo[]>，但这里同步返回已有数据
     // 从活跃任务中获取
     const task = this.activeTasks.get(taskId);
     if (task) {

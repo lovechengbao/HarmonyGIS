@@ -4,6 +4,7 @@
 
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import UIAbility from '@ohos.app.ability.UIAbility';
+import Want from '@ohos.app.ability.Want';
 import window from '@ohos.window';
 
 export default class EntryAbility extends UIAbility {
