@@ -49,6 +49,18 @@ export class MapMetadataStore {
         name: DB_NAME,
         securityLevel: relationalStore.SecurityLevel.S1
       };
+
+      // ⚠️ 如果之前初始化失败（DB 已创建但表没创建），先关闭残留的 store
+      //    relationalStore.getRdbStore 内部有缓存，不关掉会拿到上次的脏实例
+      if (MapMetadataStore.rdbStore) {
+        try {
+          await MapMetadataStore.rdbStore.close();
+        } catch (_e) {
+          // ignore
+        }
+        MapMetadataStore.rdbStore = null;
+      }
+
       MapMetadataStore.rdbStore = await relationalStore.getRdbStore(context, config);
 
       // 建表（IF NOT EXISTS 保证幂等）
@@ -69,10 +81,54 @@ export class MapMetadataStore {
         ')'
       );
 
+      // ── 强制 WAL checkpoint：把 CREATE TABLE 从 -wal 刷到 .db ──
+      //    executeSql 不支持 PRAGMA，用 querySql 执行
+      try {
+        const cpRs = await MapMetadataStore.rdbStore.querySql(
+          'PRAGMA wal_checkpoint(TRUNCATE)'
+        );
+        // wal_checkpoint 返回三列：busy(0/1), log, checkpointed
+        cpRs.close();
+      } catch (_cpErr) {
+        // checkpoint 失败不阻塞初始化（部分 OHOS 版本 querySql 不支持 PRAGMA）
+        console.warn('[MapMetadataStore] WAL checkpoint 失败，表可能未持久化');
+      }
+
+      // ── 验证表确实存在 ──
+      const verifyRs = await MapMetadataStore.rdbStore.querySql(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='${TABLE_NAME}'`
+      );
+      let tableExists = false;
+      if (verifyRs.goToFirstRow()) {
+        tableExists = verifyRs.getString(0) === TABLE_NAME;
+      }
+      verifyRs.close();
+
+      if (!tableExists) {
+        throw new Error(`Table '${TABLE_NAME}' verification failed after CREATE`);
+      }
+
       console.info('[MapMetadataStore] 数据库初始化完成');
     } catch (err) {
       console.error(`[MapMetadataStore] 数据库初始化失败: ${JSON.stringify(err)}`);
+
+      // 清理：关闭 store 并删除可能损坏的数据库文件
+      if (MapMetadataStore.rdbStore) {
+        try {
+          await MapMetadataStore.rdbStore.close();
+        } catch (_closeErr) {
+          // ignore
+        }
+      }
       MapMetadataStore.rdbStore = null;
+
+      // 删除损坏的数据库，下次 init 重新创建
+      try {
+        await relationalStore.deleteRdbStore(context, DB_NAME);
+        console.info('[MapMetadataStore] 已删除损坏的数据库，下次 init 将重建');
+      } catch (_delErr) {
+        console.warn('[MapMetadataStore] 删除损坏数据库失败（可能文件不存在）');
+      }
     }
   }
 
