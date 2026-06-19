@@ -69,6 +69,11 @@ export class DownloadTask {
   /** 服务器返回的文件名（从 Content-Disposition 响应头解析） */
   private serverFileName: string = '';
 
+  // ── HTTP 事件回调引用（API 11 的 off() 必须传回调引用才能移除）──
+  private onDataReceiveCb: ((data: ArrayBuffer) => void) | null = null;
+  private onDataReceiveProgressCb: ((p: HttpProgressData) => void) | null = null;
+  private onDataEndCb: (() => void) | null = null;
+
   constructor(config: DownloadConfig, callbacks: DownloadCallbacks, filesDir: string) {
     this.config = config;
     this.callbacks = callbacks;
@@ -352,7 +357,7 @@ export class DownloadTask {
 
       // ── dataReceive: 异步顺序写入文件，不阻塞主线程 ──
       let receiveCount = 0;
-      this.httpRequest.on('dataReceive', (data: ArrayBuffer) => {
+      this.onDataReceiveCb = (data: ArrayBuffer) => {
         // 四重检查：httpRequest 为 null 说明已 destroy（off 可能异步无效）
         if (!this.httpRequest || this.destroyed || this.stopped || !this.file) {
           return;
@@ -376,11 +381,11 @@ export class DownloadTask {
           console.error(`[DownloadTask] 写文件失败: ${err.message}`);
           reject(new Error(`写文件失败: ${err.message}`));
         });
-      });
+      };
+      this.httpRequest.on('dataReceive', this.onDataReceiveCb);
 
       // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
-      this.httpRequest.on('dataReceiveProgress',
-        (progress: HttpProgressData) => {
+      this.onDataReceiveProgressCb = (progress: HttpProgressData) => {
         console.info(`[DownloadTask] dataReceiveProgress: receiveSize=${progress.receiveSize}, totalSize=${progress.totalSize}, taskId: ${this.tid}`);
         if (progress.totalSize > 0) {
           // Content-Length 语义：
@@ -391,7 +396,8 @@ export class DownloadTask {
             progress.totalSize;
           console.info(`[DownloadTask] totalBytes 已设置: ${this.totalBytes}, taskId: ${this.tid}`);
         }
-      });
+      };
+      this.httpRequest.on('dataReceiveProgress', this.onDataReceiveProgressCb);
 
       // ── headerReceive: 捕获 Content-Disposition 获取服务器文件名 ──
       this.httpRequest.on('headerReceive', (header: Record<string, string>) => {
@@ -428,16 +434,20 @@ export class DownloadTask {
       });
 
       // ── dataEnd: 下载完成 ──
-      this.httpRequest.on('dataEnd', async () => {
-        if (this.destroyed || this.stopped) {
-          return;
-        }
-        // 等待所有排队的写操作完成
-        await this.writeQueue;
-        await this.closeFile();
-        await this.handleCompleted();
-        resolve();
-      });
+      this.onDataEndCb = () => {
+        // 用闭包内 async IIFE 执行后续逻辑，保证 off 时能通过引用移除
+        (async () => {
+          if (this.destroyed || this.stopped) {
+            return;
+          }
+          // 等待所有排队的写操作完成
+          await this.writeQueue;
+          await this.closeFile();
+          await this.handleCompleted();
+          resolve();
+        })();
+      };
+      this.httpRequest.on('dataEnd', this.onDataEndCb);
 
       // ── 发起流式请求（API 11: requestInStream）──
       this.httpRequest.requestInStream(this.config.url, {
@@ -553,14 +563,24 @@ export class DownloadTask {
   private destroyHttpRequest(): void {
     if (this.httpRequest) {
       try {
-        this.httpRequest.off('dataReceive');
-        this.httpRequest.off('dataReceiveProgress');
-        this.httpRequest.off('dataEnd');
+        // API 11 的 off() 必须传回调引用才能移除处理器；只传事件名是空操作
+        if (this.onDataReceiveCb) {
+          this.httpRequest.off('dataReceive', this.onDataReceiveCb);
+        }
+        if (this.onDataReceiveProgressCb) {
+          this.httpRequest.off('dataReceiveProgress', this.onDataReceiveProgressCb);
+        }
+        if (this.onDataEndCb) {
+          this.httpRequest.off('dataEnd', this.onDataEndCb);
+        }
         this.httpRequest.destroy();
       } catch (err) {
         console.warn(`[DownloadTask] 销毁 HTTP 请求异常: ${JSON.stringify(err)}`);
       }
       this.httpRequest = null;
+      this.onDataReceiveCb = null;
+      this.onDataReceiveProgressCb = null;
+      this.onDataEndCb = null;
     }
   }
 
