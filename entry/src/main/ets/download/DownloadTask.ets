@@ -69,6 +69,11 @@ export class DownloadTask {
   /** 服务器返回的文件名（从 Content-Disposition 响应头解析） */
   private serverFileName: string = '';
 
+  // ── 事件处理器引用（保存引用，确保 off() 能正确移除）──
+  private onDataReceive: ((data: ArrayBuffer) => void) | null = null;
+  private onDataReceiveProgress: ((progress: HttpProgressData) => void) | null = null;
+  private onDataEnd: (() => void) | null = null;
+
   constructor(config: DownloadConfig, callbacks: DownloadCallbacks, filesDir: string) {
     this.config = config;
     this.callbacks = callbacks;
@@ -352,7 +357,7 @@ export class DownloadTask {
 
       // ── dataReceive: 异步顺序写入文件，不阻塞主线程 ──
       let receiveCount = 0;
-      this.httpRequest.on('dataReceive', (data: ArrayBuffer) => {
+      this.onDataReceive = (data: ArrayBuffer) => {
         // 四重检查：httpRequest 为 null 说明已 destroy（off 可能异步无效）
         if (!this.httpRequest || this.destroyed || this.stopped || !this.file) {
           return;
@@ -376,11 +381,11 @@ export class DownloadTask {
           console.error(`[DownloadTask] 写文件失败: ${err.message}`);
           reject(new Error(`写文件失败: ${err.message}`));
         });
-      });
+      };
+      this.httpRequest.on('dataReceive', this.onDataReceive);
 
       // ── dataReceiveProgress: 获取总大小（API 11 事件名）──
-      this.httpRequest.on('dataReceiveProgress',
-        (progress: HttpProgressData) => {
+      this.onDataReceiveProgress = (progress: HttpProgressData) => {
         console.info(`[DownloadTask] dataReceiveProgress: receiveSize=${progress.receiveSize}, totalSize=${progress.totalSize}, taskId: ${this.tid}`);
         if (progress.totalSize > 0) {
           // Content-Length 语义：
@@ -391,7 +396,8 @@ export class DownloadTask {
             progress.totalSize;
           console.info(`[DownloadTask] totalBytes 已设置: ${this.totalBytes}, taskId: ${this.tid}`);
         }
-      });
+      };
+      this.httpRequest.on('dataReceiveProgress', this.onDataReceiveProgress);
 
       // ── headerReceive: 捕获 Content-Disposition 获取服务器文件名 ──
       this.httpRequest.on('headerReceive', (header: Record<string, string>) => {
@@ -428,16 +434,24 @@ export class DownloadTask {
       });
 
       // ── dataEnd: 下载完成 ──
-      this.httpRequest.on('dataEnd', async () => {
+      this.onDataEnd = async () => {
         if (this.destroyed || this.stopped) {
           return;
         }
         // 等待所有排队的写操作完成
         await this.writeQueue;
+        // ⚠️ await 后必须重新检查状态：用户可能在等待期间点了暂停
+        // 此时 stopped=true 且 state=PAUSED，不应再调 handleCompleted
+        if (this.destroyed || this.stopped || this.state !== DownloadState.DOWNLOADING) {
+          console.info(`[DownloadTask] dataEnd 后检测到非下载状态 (state=${this.state}, stopped=${this.stopped})，跳过完成处理`);
+          await this.closeFile();
+          return;
+        }
         await this.closeFile();
         await this.handleCompleted();
         resolve();
-      });
+      };
+      this.httpRequest.on('dataEnd', this.onDataEnd);
 
       // ── 发起流式请求（API 11: requestInStream）──
       this.httpRequest.requestInStream(this.config.url, {
@@ -553,14 +567,24 @@ export class DownloadTask {
   private destroyHttpRequest(): void {
     if (this.httpRequest) {
       try {
-        this.httpRequest.off('dataReceive');
-        this.httpRequest.off('dataReceiveProgress');
-        this.httpRequest.off('dataEnd');
+        // 传回调引用确保 off() 正确移除（避免 API 11 只传事件名无效）
+        if (this.onDataReceive) {
+          this.httpRequest.off('dataReceive', this.onDataReceive);
+        }
+        if (this.onDataReceiveProgress) {
+          this.httpRequest.off('dataReceiveProgress', this.onDataReceiveProgress);
+        }
+        if (this.onDataEnd) {
+          this.httpRequest.off('dataEnd', this.onDataEnd);
+        }
         this.httpRequest.destroy();
       } catch (err) {
         console.warn(`[DownloadTask] 销毁 HTTP 请求异常: ${JSON.stringify(err)}`);
       }
       this.httpRequest = null;
+      this.onDataReceive = null;
+      this.onDataReceiveProgress = null;
+      this.onDataEnd = null;
     }
   }
 
@@ -609,7 +633,9 @@ export class DownloadTask {
    * 处理下载完成
    */
   private async handleCompleted(): Promise<void> {
-    if (this.destroyed) {
+    // 双重守卫：任务已销毁，或状态不是下载中（可能已被暂停/取消）
+    if (this.destroyed || this.state !== DownloadState.DOWNLOADING) {
+      console.info(`[DownloadTask] handleCompleted 跳过 — destroyed=${this.destroyed}, state=${this.state}`);
       return;
     }
 
