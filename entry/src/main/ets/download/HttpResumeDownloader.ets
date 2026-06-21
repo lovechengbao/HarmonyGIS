@@ -323,6 +323,11 @@ export class HttpResumeDownloader {
           return;
         }
         await this.writeQueue;
+        // 二次检查：await 期间可能被 pause() 暂停
+        if (this.shouldStop) {
+          resolve();
+          return;
+        }
         await this.closeFile();
         this.setState(ResumeDownloaderState.COMPLETED);
         console.info(`[HttpResumeDownloader] 下载完成: ${this.filePath}`);
@@ -344,6 +349,11 @@ export class HttpResumeDownloader {
           return;
         }
         await this.writeQueue;
+        // 二次检查：await 期间可能被暂停
+        if (this.shouldStop) {
+          resolve();
+          return;
+        }
         await this.closeFile();
         reject(err);
       });

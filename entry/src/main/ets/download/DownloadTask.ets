@@ -442,6 +442,13 @@ export class DownloadTask {
           }
           // 等待所有排队的写操作完成
           await this.writeQueue;
+          // 二次检查：await 期间可能被 pause() 暂停
+          // （pause() 在 closeFileNow() 中重置 writeQueue，但 dataEnd
+          // 的 async 上下文可能在 writeQueue 旧链 resolve 后才被唤醒，
+          // 此时 stopped 已为 true 但 handler 尚未检查）
+          if (this.destroyed || this.stopped) {
+            return;
+          }
           await this.closeFile();
           await this.handleCompleted();
           resolve();
@@ -473,6 +480,10 @@ export class DownloadTask {
           return;
         }
         await this.writeQueue;
+        // 二次检查：await 期间可能被暂停
+        if (this.destroyed || this.stopped) {
+          return;
+        }
         await this.closeFile();
         reject(err);
       });
