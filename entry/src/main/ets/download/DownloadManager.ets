@@ -142,12 +142,14 @@ export class DownloadManager {
       console.info(`[DownloadManager] 恢复任务: ${info.taskId}, 已下载: ${info.downloadedBytes}`);
     }
 
-    // 启动等待队列中的任务（受并发限制）
-    this.processPendingQueue();
+    // 注意：不自动启动等待队列（this.processPendingQueue()）。
+    // 原因：从持久化恢复的任务需要调用方先通过 updateTaskCallbacks() 重新注册
+    // 业务回调（如下载完成后解压），然后由调用方显式 resumeTask/resumeAll。
+    // 如果在此处自动恢复，任务会在回调就位前开始下载，完成后解压逻辑丢失。
 
     this.initialized = true;
     console.info(
-      `[DownloadManager] 初始化完成, 活跃任务: ${this.activeTasks.size}, 等待: ${this.pendingQueue.length}`);
+      `[DownloadManager] 初始化完成, 活跃任务: ${this.activeTasks.size}, 等待: ${this.pendingQueue.length}（未自动恢复）`);
   }
 
   /**

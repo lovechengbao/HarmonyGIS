@@ -96,6 +96,10 @@ struct MapPage {
 
       // 初始化完成后，从持久化加载任务标签
       await this.loadTaskLabels();
+      // 恢复上次未完成的任务（initialize() 不再自动恢复，由调用方显式控制）
+      if (this.manager) {
+        await this.manager.resumeAll();
+      }
       this.syncDisplayItems();
       this.isInitialized = true;
       this.statusText = '就绪';
