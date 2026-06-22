@@ -317,6 +317,31 @@ export class DownloadTask {
    * @param begins 起始字节偏移（0 = 新下载，>0 = 断点续传）
    */
   private async startHttpDownload(begins: number): Promise<void> {
+    // ── 断点位置校验 ────────────────────────────────────────────
+    // 持久化的 downloadedBytes 可能因应用被杀而过期（progress 每 5s 持久化一次）。
+    // 实际文件大小可能 > tracked bytes（写成功但未持久化），导致 APPEND 模式下
+    // Range 数据被追加到错误位置，ZIP 文件损坏。以实际文件大小为准。
+    if (begins > 0) {
+      try {
+        const stat = fileIo.statSync(this.filePath);
+        if (stat.size !== begins) {
+          console.warn(`[DownloadTask] 断点修正: begins=${begins} → fileSize=${stat.size}, taskId: ${this.tid}`);
+          begins = stat.size;
+          this.downloadedBytes = stat.size;
+          // 文件可能被清空或缩小，重置未知大小的标记
+          if (begins === 0) {
+            this.totalBytes = -1;
+          }
+        }
+      } catch (err) {
+        // 文件不存在（极端情况：被外部删除），重置为全新下载
+        console.warn(`[DownloadTask] 文件不存在，重置下载: ${this.filePath}`);
+        begins = 0;
+        this.downloadedBytes = 0;
+        this.totalBytes = -1;
+      }
+    }
+
     // 清理旧资源
     this.destroyHttpRequest();
     await this.closeFile();
