@@ -76,6 +76,8 @@ export { OfflineMap } from './OfflineMap';
 
 export { OfflineMapBridge } from './OfflineMapBridge';
 
+export { LocalTileHttpServer } from './LocalTileHttpServer';
+
 export { ZipExtractor } from './ZipExtractor';
 export type { ExtractProgressCallback } from './ZipExtractor';
 

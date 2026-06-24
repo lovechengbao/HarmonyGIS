@@ -14,6 +14,7 @@
 
 import { OfflineMap } from './OfflineMap';
 import { DownloadManagerOptions } from './DownloadManager';
+import { LocalTileHttpServer } from './LocalTileHttpServer';
 import common from '@ohos.app.ability.common';
 
 /**
@@ -23,8 +24,17 @@ import common from '@ohos.app.ability.common';
  */
 type JsCallback = (callbackId: string, result: number) => void;
 
+/**
+ * JS 字符串回调类型
+ * @param callbackId JS 侧传入的回调标识
+ * @param result 字符串结果（如 baseUrl）
+ */
+type JsStringCallback = (callbackId: string, result: string) => void;
+
 export class OfflineMapBridge {
   private static callback: JsCallback;
+  private static stringCallback: JsStringCallback;
+  private static tileServer: LocalTileHttpServer | null = null;
 
   /**
    * 初始化 Bridge（必须在 JS 调用前执行）
@@ -88,5 +98,60 @@ export class OfflineMapBridge {
   static async pauseDownloadingMap(callbackId: string, mapId: string): Promise<void> {
     await OfflineMap.pauseDownloadingMap(mapId);
     OfflineMapBridge.callback(callbackId, 0);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 本地瓦片 HTTP 服务器
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * 启动本地瓦片 HTTP 服务器
+   *
+   * @param tileRoot 3D Tiles 数据根目录
+   * @param port     端口号，默认 8765
+   */
+  static async initTileServer(tileRoot: string, port: number = 8765): Promise<void> {
+    if (OfflineMapBridge.tileServer) {
+      console.warn('[OfflineMapBridge] 瓦片服务器已存在，先停止旧实例');
+      await OfflineMapBridge.tileServer.stop();
+    }
+    OfflineMapBridge.tileServer = new LocalTileHttpServer(tileRoot, port);
+    await OfflineMapBridge.tileServer.start();
+    console.info('[OfflineMapBridge] 瓦片服务器已启动');
+  }
+
+  /**
+   * 停止瓦片服务器（页面销毁时调用）
+   */
+  static async stopTileServer(): Promise<void> {
+    if (OfflineMapBridge.tileServer) {
+      await OfflineMapBridge.tileServer.stop();
+      OfflineMapBridge.tileServer = null;
+    }
+  }
+
+  /**
+   * 注入字符串回调（用于将 baseUrl 推回 JS）
+   */
+  static setStringCallback(callback: JsStringCallback): void {
+    OfflineMapBridge.stringCallback = callback;
+  }
+
+  /**
+   * 获取本地瓦片基础 URL（JS 侧通过 Bridge 调用）
+   *
+   * 对应 JS 侧：CgsNativeBridge.getBridgeMethod('getTileBaseUrl')
+   */
+  static getTileBaseUrl(callbackId: string): void {
+    let baseUrl = '';
+    if (OfflineMapBridge.tileServer) {
+      baseUrl = OfflineMapBridge.tileServer.getBaseUrl();
+    }
+    if (OfflineMapBridge.stringCallback) {
+      OfflineMapBridge.stringCallback(callbackId, baseUrl);
+    } else {
+      console.error('[OfflineMapBridge] stringCallback 未注入，无法返回 baseUrl');
+    }
+    console.info('[OfflineMapBridge] getTileBaseUrl → ' + baseUrl);
   }
 }
